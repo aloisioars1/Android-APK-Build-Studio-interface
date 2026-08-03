@@ -79,7 +79,9 @@ export async function generateAiChangelog(
   options: ChangelogOptions,
   onLog?: (msg: string, type?: string) => void
 ): Promise<GeneratedChangelogResult> {
-  const apiKey = process.env.API_KEY || process.env.GEMINI_API_KEY;
+  
+const apiKey = (typeof localStorage !== 'undefined' ? localStorage.getItem('GEMINI_API_KEY') 
+: null) || (process as any).env?.API_KEY || (import.meta as any).env?.VITE_API_KEY || (import.meta as any).env?.VITE_GEMINI_API_KEY || (options as any).apiKey || '';
 
   onLog?.(`🤖 [IA Changelog] Analisando metadados e histórico da versão v${options.versionName}...`, "info");
 
