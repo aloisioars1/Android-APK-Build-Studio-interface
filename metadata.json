@@ -1,0 +1,11 @@
+{
+  "name": "Remix Android APK Build Studio interface ",
+  "description": "IDE Mobile com Ingestão de ZIP e Automação de CI/CD para GitHub.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
