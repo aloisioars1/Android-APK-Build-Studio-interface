@@ -1258,7 +1258,18 @@ const App: React.FC = () => {
             </div>
           </section>
 
-          <section id="App-Icon-Section-Container" className="space-y-4 border-t border-white/5 pt-6">
+          <div className="mb-4 p-3 bg-amber-500/10 border border-amber-500/30 rounded-xl">
+  <label className="text-[9px] text-slate-500 mb-1 block font-bold uppercase">🔑 GEMINI API KEY (fica salva só no seu celular)</label>
+  <input
+    type="password"
+    value={geminiKey}
+    onChange={e => setGeminiKey(e.target.value)}
+    placeholder="Cole sua key AIza... aqui"
+    className="w-full bg-black/40 p-2 rounded-xl border border-white/10 text-[11px] outline-none"
+  />
+</div>
+
+<section id="App-Icon-Section-Container" className="space-y-4 border-t border-white/5 pt-6">
             <div className="flex items-center justify-between">
               <h3 className="text-[10px] font-black text-slate-500 uppercase tracking-widest border-l-2 border-amber-500 pl-3">App Icon & Branding</h3>
               {iconGallery.length > 0 && (
