@@ -15,20 +15,26 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Configurar Node 20
+      - name: Configurar Node 22
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
 
-      - name: Build do projeto
+      - name: Ver o que tem no projeto
         run: |
-          npm install
-          npm run build
+          ls -la
+          cat package.json
 
-      - name: Transformar em Android e Compilar
+      - name: Instalar e Buildar
         run: |
-          npm install @capacitor/core @capacitor/cli @capacitor/android
-          npx cap init "App IDE" "com.aloisioars.ide" --web-dir=dist --npm-client=npm
+          npm install --legacy-peer-deps
+          npm run build || npx vite build
+          ls -la dist/ || ls -la build/ || ls -la
+
+      - name: Gerar Android
+        run: |
+          npm install @capacitor/core @capacitor/cli @capacitor/android --legacy-peer-deps
+          npx cap init "MeuApp" "com.aloisioars.app" --web-dir=dist --npm-client=npm || true
           npx cap add android || true
           npx cap sync android
           cd android
@@ -38,5 +44,5 @@ jobs:
       - name: Salvar APK
         uses: actions/upload-artifact@v4
         with:
-          name: meu-app-apk
+          name: apk-instalavel
           path: android/app/build/outputs/apk/debug/app-debug.apk
