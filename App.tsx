@@ -93,8 +93,13 @@ const App: React.FC = () => {
 
   const [activeTab, setActiveTab] = useState<TabType>(TabType.PREVIEW);
   const [generated, setGenerated] = useState<GeneratedCode | null>(null);
+  
   const [aiPrompt, setAiPrompt] = useState('');
+  const [geminiKey, setGeminiKey] = useState(() => localStorage.getItem('GEMINI_API_KEY') || '');
   const [attachments, setAttachments] = useState<AppAsset[]>([]);
+  useEffect(() => {
+  if (geminiKey) localStorage.setItem('GEMINI_API_KEY', geminiKey);
+}, [geminiKey]);
   const [isListening, setIsListening] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
