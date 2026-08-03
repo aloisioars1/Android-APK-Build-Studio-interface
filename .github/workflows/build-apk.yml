@@ -20,26 +20,24 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Ver o que tem no projeto
-        run: |
-          ls -la
-          cat package.json
-
-      - name: Instalar e Buildar
+      - name: Instalar e Buildar site
         run: |
           npm install --legacy-peer-deps
           npm run build || npx vite build
-          ls -la dist/ || ls -la build/ || ls -la
+          ls -la
+          ls -la dist/ || ls -la build/
 
       - name: Gerar Android
         run: |
           npm install @capacitor/core @capacitor/cli @capacitor/android --legacy-peer-deps
-          npx cap init "MeuApp" "com.aloisioars.app" --web-dir=dist --npm-client=npm || true
-          npx cap add android || true
+          # Cria o config na mão pra não dar erro de appId
+          echo '{"appId":"com.aloisioars.app","appName":"MeuApp","webDir":"dist"}' > capacitor.config.json
+          cat capacitor.config.json
+          npx cap add android
           npx cap sync android
           cd android
           chmod +x gradlew
-          ./gradlew assembleDebug
+         ./gradlew assembleDebug
 
       - name: Salvar APK
         uses: actions/upload-artifact@v4
