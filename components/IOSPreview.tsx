@@ -35,11 +35,34 @@ const IOSPreview: React.FC<IOSPreviewProps> = ({
   useLayoutEffect(() => {
     const handleResize = () => {
       if (!containerRef.current) return;
-      setScale(Math.min(containerRef.current.clientHeight / 800, containerRef.current.clientWidth / 400, 1)); 
+      const ch = containerRef.current.clientHeight;
+      const cw = containerRef.current.clientWidth;
+      if (ch <= 0 || cw <= 0) {
+        setScale(0.75);
+        return;
+      }
+      const computed = Math.min((ch - 40) / 800, (cw - 16) / 400, 1);
+      setScale(Math.max(0.4, Number.isNaN(computed) ? 0.75 : computed));
     };
+
     handleResize();
+
+    const observer = new ResizeObserver(() => {
+      handleResize();
+    });
+
+    if (containerRef.current) {
+      observer.observe(containerRef.current);
+    }
+
     window.addEventListener('resize', handleResize);
-    return () => window.removeEventListener('resize', handleResize);
+    const timer = setTimeout(handleResize, 150);
+
+    return () => {
+      observer.disconnect();
+      window.removeEventListener('resize', handleResize);
+      clearTimeout(timer);
+    };
   }, []);
 
   useEffect(() => {

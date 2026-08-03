@@ -1,6 +1,17 @@
 import React, { useState, useMemo } from 'react';
 import { AppConfig, GeneratedCode, AppAsset } from '../types';
 import { Icons } from '../constants';
+import {
+  ResponsiveContainer,
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  Tooltip,
+  Legend,
+  CartesianGrid,
+  Cell
+} from 'recharts';
 
 interface AabExplorerProps {
   config: AppConfig;
@@ -24,6 +35,10 @@ export const AabExplorer: React.FC<AabExplorerProps> = ({ config, generated, add
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [selectedFile, setSelectedFile] = useState<AabFileItem | null>(null);
   const [minSizeFilter, setMinSizeFilter] = useState<number>(0); // in KB
+
+  // Chart view preferences
+  const [chartUnit, setChartUnit] = useState<'KB' | 'MB'>('KB');
+  const [chartViewMode, setChartViewMode] = useState<'categoryBreakdown' | 'comparison'>('categoryBreakdown');
 
   // Build simulated / analyzed AAB file tree from current code & assets
   const aabFiles = useMemo<AabFileItem[]>(() => {
@@ -195,6 +210,77 @@ export const AabExplorer: React.FC<AabExplorerProps> = ({ config, generated, add
 
   const largeFiles = useMemo(() => aabFiles.filter(f => f.isLarge || f.rawSizeBytes > 250000), [aabFiles]);
 
+  // Aggregated category size metrics for Recharts
+  const categoryChartData = useMemo(() => {
+    const map: Record<string, { label: string; category: string; rawBytes: number; compressedBytes: number; downloadBytes: number; fileCount: number; color: string }> = {
+      dex: { label: 'DEX Bytecode (.dex)', category: 'dex', rawBytes: 0, compressedBytes: 0, downloadBytes: 0, fileCount: 0, color: '#6366f1' },
+      lib: { label: 'Libs Nativas (.so)', category: 'lib', rawBytes: 0, compressedBytes: 0, downloadBytes: 0, fileCount: 0, color: '#f59e0b' },
+      assets: { label: 'Assets (.assets)', category: 'assets', rawBytes: 0, compressedBytes: 0, downloadBytes: 0, fileCount: 0, color: '#10b981' },
+      res: { label: 'Recursos (.res)', category: 'res', rawBytes: 0, compressedBytes: 0, downloadBytes: 0, fileCount: 0, color: '#ec4899' },
+      manifest: { label: 'Manifest (.xml)', category: 'manifest', rawBytes: 0, compressedBytes: 0, downloadBytes: 0, fileCount: 0, color: '#06b6d4' },
+      metadata: { label: 'Bundle Metadata', category: 'metadata', rawBytes: 0, compressedBytes: 0, downloadBytes: 0, fileCount: 0, color: '#8b5cf6' }
+    };
+
+    aabFiles.forEach(f => {
+      const entry = map[f.category] || map.metadata;
+      entry.rawBytes += f.rawSizeBytes;
+      entry.compressedBytes += f.compressedSizeBytes;
+      entry.fileCount += 1;
+      if (f.category === 'lib') {
+        if (f.path.includes('arm64-v8a')) {
+          entry.downloadBytes += f.compressedSizeBytes;
+        }
+      } else {
+        entry.downloadBytes += f.compressedSizeBytes;
+      }
+    });
+
+    return Object.values(map)
+      .filter(item => item.rawBytes > 0)
+      .map(item => {
+        const factor = chartUnit === 'MB' ? (1024 * 1024) : 1024;
+        const compressedVal = Number((item.compressedBytes / factor).toFixed(chartUnit === 'MB' ? 2 : 0));
+        const rawVal = Number((item.rawBytes / factor).toFixed(chartUnit === 'MB' ? 2 : 0));
+        const downloadVal = Number((item.downloadBytes / factor).toFixed(chartUnit === 'MB' ? 2 : 0));
+        const pct = totalCompressedBytes > 0 ? Number(((item.compressedBytes / totalCompressedBytes) * 100).toFixed(1)) : 0;
+
+        return {
+          ...item,
+          compressed: compressedVal,
+          raw: rawVal,
+          download: downloadVal,
+          pct,
+          unitLabel: chartUnit
+        };
+      })
+      .sort((a, b) => b.compressedBytes - a.compressedBytes);
+  }, [aabFiles, totalCompressedBytes, chartUnit]);
+
+  // Overall Comparison Data (Raw vs Compressed AAB vs Split APK Download)
+  const chartComparisonData = useMemo(() => {
+    const factor = chartUnit === 'MB' ? (1024 * 1024) : 1024;
+    return [
+      {
+        stage: 'Bruto (Uncompressed)',
+        tamanho: Number((totalRawBytes / factor).toFixed(chartUnit === 'MB' ? 2 : 0)),
+        color: '#94a3b8',
+        desc: 'Soma do tamanho de todos os arquivos descompactados'
+      },
+      {
+        stage: 'Pacote AAB (Zip)',
+        tamanho: Number((totalCompressedBytes / factor).toFixed(chartUnit === 'MB' ? 2 : 0)),
+        color: '#6366f1',
+        desc: 'Tamanho total enviado para o Play Console'
+      },
+      {
+        stage: 'Download Split (Dispositivo)',
+        tamanho: Number((estimatedDeviceDownloadBytes / factor).toFixed(chartUnit === 'MB' ? 2 : 0)),
+        color: '#10b981',
+        desc: 'Tamanho real baixado pelo usuário (1 arquitetura)'
+      }
+    ];
+  }, [totalRawBytes, totalCompressedBytes, estimatedDeviceDownloadBytes, chartUnit]);
+
   // Filtered file list
   const filteredFiles = useMemo(() => {
     return aabFiles.filter(file => {
@@ -305,6 +391,211 @@ export const AabExplorer: React.FC<AabExplorerProps> = ({ config, generated, add
           <p className="text-xl font-extrabold text-amber-400">{largeFiles.length} arquivos</p>
           <p className="text-[10px] text-amber-500/80">&gt;200KB requerem atenção</p>
         </div>
+      </div>
+
+      {/* Recharts Module Size Visual Breakdown Section */}
+      <div className="bg-slate-900/90 rounded-2xl border border-indigo-500/30 p-5 space-y-4 shadow-xl">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-white/10 pb-3">
+          <div className="space-y-0.5">
+            <h4 className="text-xs font-black uppercase tracking-wider text-indigo-300 flex items-center gap-2">
+              <span>📊</span> Gráfico de Tamanho dos Módulos (.DEX, Libs, Assets, Res)
+            </h4>
+            <p className="text-[11px] text-slate-400">
+              Visualização interativa para identificar qual módulo consome mais espaço no pacote Android.
+            </p>
+          </div>
+
+          <div className="flex items-center gap-2">
+            {/* View Mode Toggle */}
+            <div className="flex bg-black/50 p-1 rounded-xl border border-white/10 text-xs">
+              <button
+                onClick={() => setChartViewMode('categoryBreakdown')}
+                className={`px-2.5 py-1 rounded-lg font-bold text-[10px] uppercase transition-all ${
+                  chartViewMode === 'categoryBreakdown'
+                    ? 'bg-indigo-600 text-white shadow'
+                    : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                Por Categoria
+              </button>
+              <button
+                onClick={() => setChartViewMode('comparison')}
+                className={`px-2.5 py-1 rounded-lg font-bold text-[10px] uppercase transition-all ${
+                  chartViewMode === 'comparison'
+                    ? 'bg-indigo-600 text-white shadow'
+                    : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                Comparativo
+              </button>
+            </div>
+
+            {/* Unit Toggle */}
+            <div className="flex bg-black/50 p-1 rounded-xl border border-white/10 text-xs">
+              <button
+                onClick={() => setChartUnit('KB')}
+                className={`px-2 py-1 rounded-lg font-mono font-bold text-[10px] transition-all ${
+                  chartUnit === 'KB' ? 'bg-indigo-500 text-white' : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                KB
+              </button>
+              <button
+                onClick={() => setChartUnit('MB')}
+                className={`px-2 py-1 rounded-lg font-mono font-bold text-[10px] transition-all ${
+                  chartUnit === 'MB' ? 'bg-indigo-500 text-white' : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                MB
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {/* Multi-segment Percentage Share Bar */}
+        <div className="space-y-1.5 bg-black/40 p-3 rounded-xl border border-white/5">
+          <div className="flex items-center justify-between text-[10px] font-bold text-slate-300">
+            <span>Proporção por Categoria no AAB (100%):</span>
+            <span className="font-mono text-indigo-400">{formatSize(totalCompressedBytes)}</span>
+          </div>
+
+          <div className="h-3 w-full bg-slate-950 rounded-full overflow-hidden flex">
+            {categoryChartData.map((item, idx) => (
+              <div
+                key={idx}
+                style={{ width: `${item.pct}%`, backgroundColor: item.color }}
+                className="h-full transition-all duration-500 relative group cursor-pointer"
+                title={`${item.label}: ${item.pct}% (${item.compressed} ${item.unitLabel})`}
+              />
+            ))}
+          </div>
+
+          <div className="flex flex-wrap items-center gap-3 pt-1 text-[10px]">
+            {categoryChartData.map((item, idx) => (
+              <div key={idx} className="flex items-center gap-1.5">
+                <span className="w-2.5 h-2.5 rounded-sm shrink-0" style={{ backgroundColor: item.color }} />
+                <span className="text-slate-300 font-medium">{item.category.toUpperCase()}:</span>
+                <span className="font-mono font-bold text-white">{item.pct}%</span>
+                <span className="text-slate-500 font-mono">({item.compressed} {item.unitLabel})</span>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Recharts Bar Chart View */}
+        <div className="h-[280px] w-full pt-2">
+          <ResponsiveContainer width="100%" height="100%">
+            {chartViewMode === 'categoryBreakdown' ? (
+              <BarChart data={categoryChartData} margin={{ top: 10, right: 10, left: 10, bottom: 25 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#334155" vertical={false} opacity={0.5} />
+                <XAxis
+                  dataKey="label"
+                  stroke="#94a3b8"
+                  fontSize={10}
+                  tickLine={false}
+                  interval={0}
+                  tick={{ fill: '#cbd5e1', fontSize: 10 }}
+                />
+                <YAxis
+                  stroke="#94a3b8"
+                  fontSize={10}
+                  tickLine={false}
+                  unit={` ${chartUnit}`}
+                  tick={{ fill: '#cbd5e1', fontSize: 10 }}
+                />
+                <Tooltip
+                  cursor={{ fill: 'rgba(255, 255, 255, 0.05)' }}
+                  content={({ active, payload }) => {
+                    if (active && payload && payload.length) {
+                      const data = payload[0].payload;
+                      return (
+                        <div className="bg-slate-950 border border-indigo-500/40 p-3 rounded-xl shadow-2xl text-xs space-y-1 font-mono">
+                          <p className="font-bold text-indigo-300 border-b border-white/10 pb-1 flex items-center gap-2 font-sans">
+                            <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: data.color }} />
+                            {data.label}
+                          </p>
+                          <div className="space-y-0.5 text-[11px] pt-1">
+                            <p className="text-slate-300">
+                              Compactado (AAB): <span className="text-emerald-400 font-bold">{data.compressed} {data.unitLabel}</span> ({data.pct}% do bundle)
+                            </p>
+                            <p className="text-slate-400">
+                              Bruto (Descompactado): <span className="text-slate-200 font-bold">{data.raw} {data.unitLabel}</span>
+                            </p>
+                            <p className="text-slate-400">
+                              Estimativa Split Play: <span className="text-blue-400 font-bold">{data.download} {data.unitLabel}</span>
+                            </p>
+                            <p className="text-slate-500 text-[10px]">Total de arquivos: {data.fileCount} itens</p>
+                          </div>
+                        </div>
+                      );
+                    }
+                    return null;
+                  }}
+                />
+                <Legend
+                  wrapperStyle={{ fontSize: '11px', paddingTop: '10px' }}
+                  formatter={(value) => <span className="text-slate-300 font-bold">{value}</span>}
+                />
+                <Bar dataKey="compressed" name={`Tamanho no AAB (${chartUnit})`} radius={[6, 6, 0, 0]}>
+                  {categoryChartData.map((entry, index) => (
+                    <Cell key={`cell-${index}`} fill={entry.color} />
+                  ))}
+                </Bar>
+                <Bar dataKey="raw" name={`Tamanho Bruto (${chartUnit})`} fill="#475569" opacity={0.6} radius={[4, 4, 0, 0]} />
+              </BarChart>
+            ) : (
+              <BarChart data={chartComparisonData} margin={{ top: 10, right: 10, left: 10, bottom: 25 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#334155" vertical={false} opacity={0.5} />
+                <XAxis dataKey="stage" stroke="#94a3b8" fontSize={10} tickLine={false} tick={{ fill: '#cbd5e1', fontSize: 10 }} />
+                <YAxis stroke="#94a3b8" fontSize={10} tickLine={false} unit={` ${chartUnit}`} tick={{ fill: '#cbd5e1', fontSize: 10 }} />
+                <Tooltip
+                  cursor={{ fill: 'rgba(255, 255, 255, 0.05)' }}
+                  content={({ active, payload }) => {
+                    if (active && payload && payload.length) {
+                      const data = payload[0].payload;
+                      return (
+                        <div className="bg-slate-950 border border-indigo-500/40 p-3 rounded-xl shadow-2xl text-xs space-y-1">
+                          <p className="font-bold text-white border-b border-white/10 pb-1">{data.stage}</p>
+                          <p className="text-emerald-400 font-bold font-mono text-sm">{data.tamanho} {chartUnit}</p>
+                          <p className="text-[10px] text-slate-400">{data.desc}</p>
+                        </div>
+                      );
+                    }
+                    return null;
+                  }}
+                />
+                <Bar dataKey="tamanho" name={`Volume em ${chartUnit}`} radius={[6, 6, 0, 0]}>
+                  {chartComparisonData.map((entry, index) => (
+                    <Cell key={`cell-comp-${index}`} fill={entry.color} />
+                  ))}
+                </Bar>
+              </BarChart>
+            )}
+          </ResponsiveContainer>
+        </div>
+
+        {/* Dynamic AI Optimization Recommendation based on top chart category */}
+        {categoryChartData.length > 0 && (
+          <div className="bg-indigo-950/40 p-3.5 rounded-xl border border-indigo-500/30 flex items-start gap-3">
+            <span className="text-xl shrink-0">💡</span>
+            <div className="space-y-0.5 text-xs">
+              <span className="font-bold text-indigo-300 uppercase tracking-wider text-[10px] block">
+                Recomendação de Otimização (Módulo com maior impacto: {categoryChartData[0].label})
+              </span>
+              <p className="text-slate-300 leading-relaxed text-[11px]">
+                {categoryChartData[0].category === 'dex' ? (
+                  <>O módulo <strong>DEX Bytecode</strong> representa <strong>{categoryChartData[0].pct}%</strong> do total. Ative <code className="text-indigo-300 font-mono">minifyEnabled true</code> e <code className="text-indigo-300 font-mono">shrinkResources true</code> no <code className="text-indigo-300 font-mono">build.gradle</code> para aplicar R8/ProGuard e remover código morto.</>
+                ) : categoryChartData[0].category === 'lib' ? (
+                  <>As <strong>Bibliotecas Nativas (.so)</strong> representam <strong>{categoryChartData[0].pct}%</strong> do pacote. O formato .AAB dividirá as bibliotecas por ABI (arm64-v8a vs armeabi-v7a), reduzindo o tamanho de download para cada dispositivo.</>
+                ) : categoryChartData[0].category === 'assets' ? (
+                  <>Os <strong>Assets (.assets)</strong> representam <strong>{categoryChartData[0].pct}%</strong>. Considere converter imagens para WebP ou utilizar a entrega sob demanda via <em>Play Feature Delivery</em> para manter a instalação inicial leve.</>
+                ) : (
+                  <>Os <strong>Recursos (.res)</strong> representam <strong>{categoryChartData[0].pct}%</strong>. Verifique imagens rasterizadas e prefira <em>Vector Drawables (SVG/XML)</em> para escalar sem aumentar o tamanho do APK.</>
+                )}
+              </p>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Large File Warnings Section */}

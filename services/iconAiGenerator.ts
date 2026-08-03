@@ -12,9 +12,10 @@ export async function generateIconWithAi(brandingPrompt: string): Promise<string
 export async function generateAutomaticIconBase64(
   appName: string,
   appDescription?: string,
-  userPrompt?: string
+  userPrompt?: string,
+  customApiKey?: string
 ): Promise<string> {
-  const apiKey = process.env.API_KEY || process.env.GEMINI_API_KEY;
+  const apiKey = customApiKey || process.env.API_KEY || process.env.GEMINI_API_KEY;
 
   // Constrói o prompt detalhado para o ícone de aplicativo Android
   const baseDescription = appDescription && appDescription.trim().length > 0

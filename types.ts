@@ -1,4 +1,11 @@
 
+export interface SavedIcon {
+  id: string;
+  data: string; // Base64
+  prompt?: string;
+  timestamp: number;
+}
+
 export interface AppAsset {
   name: string;
   data: string; // Base64
@@ -31,6 +38,7 @@ export interface AppConfig {
   githubUser: string;
   githubRepo: string;
   githubToken: string;
+  apiKey?: string;
   googleProjectId: string;
   cloudRegion: string;
   assets: AppAsset[];
@@ -62,6 +70,28 @@ export interface AppConfig {
 
   // App Meta & Documentation
   appDescription?: string;
+
+  // Versioning
+  versionCode?: number;
+  versionName?: string;
+
+  // Google Play Console (Android Publisher API)
+  playConsoleServiceAccountJson?: string;
+  playConsoleTrack?: 'internal' | 'alpha' | 'beta' | 'production';
+  playConsoleReleaseNotes?: string;
+  enablePlayConsolePublish?: boolean;
+  playConsoleUserFraction?: number; // Ex: 0.10 (10% dos usuários)
+  playConsoleReleaseStatus?: 'draft' | 'inProgress' | 'halted' | 'completed';
+  playConsoleRolloutHistory?: Array<{
+    id: string;
+    versionCode: number;
+    versionName: string;
+    track: string;
+    userFraction: number;
+    status: 'draft' | 'inProgress' | 'halted' | 'completed';
+    timestamp: number;
+    notes?: string;
+  }>;
 }
 
 export enum TabType {
@@ -74,7 +104,9 @@ export enum TabType {
   BUILD_HISTORY = 'BUILD_HISTORY',
   DEPLOY = 'DEPLOY',
   MANIFEST_VALIDATOR = 'MANIFEST_VALIDATOR',
-  README_GENERATOR = 'README_GENERATOR'
+  README_GENERATOR = 'README_GENERATOR',
+  PLAY_CONSOLE = 'PLAY_CONSOLE',
+  COMPONENT_LIBRARY = 'COMPONENT_LIBRARY'
 }
 
 /* Updated ConversationMessage to include attachments which are used for file/image context */

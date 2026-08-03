@@ -10,6 +10,13 @@ import {
   analyzeManifestWithAi
 } from '../services/manifestValidatorService';
 import { generateAndroidProject } from '../services/androidCodeGenerator';
+import { mainActivityKtTemplate } from '../services/kotlinTemplates';
+import {
+  KotlinLintResult,
+  KotlinLintIssue,
+  analyzeKotlinLocally,
+  runAiKotlinLint
+} from '../services/kotlinLintService';
 
 interface ManifestValidatorSectionProps {
   config: AppConfig;
@@ -25,23 +32,41 @@ export const ManifestValidatorSection: React.FC<ManifestValidatorSectionProps> =
   const [manifestXml, setManifestXml] = useState<string>('');
   const [analyzing, setAnalyzing] = useState<boolean>(false);
   const [analysisResult, setAnalysisResult] = useState<ManifestValidationResult | null>(null);
-  const [activeSubTab, setActiveSubTab] = useState<'permissions' | 'security' | 'optimized' | 'editor'>('permissions');
+  const [activeSubTab, setActiveSubTab] = useState<'permissions' | 'security' | 'kotlinLint' | 'optimized' | 'editor'>('permissions');
   const [permissionFilter, setPermissionFilter] = useState<'all' | 'risk' | 'declaration' | 'safe'>('all');
   const [appliedToProject, setAppliedToProject] = useState<boolean>(false);
   const [copyStatus, setCopyStatus] = useState<string | null>(null);
 
-  // Initialize with current project's generated Manifest XML
+  // Kotlin Static Lint State
+  const [kotlinCode, setKotlinCode] = useState<string>('');
+  const [runningKotlinLint, setRunningKotlinLint] = useState<boolean>(false);
+  const [kotlinLintResult, setKotlinLintResult] = useState<KotlinLintResult | null>(null);
+  const [kotlinCategoryFilter, setKotlinCategoryFilter] = useState<'all' | 'error' | 'performance' | 'security' | 'memory' | 'coroutines'>('all');
+  const [kotlinViewMode, setKotlinViewMode] = useState<'issues' | 'editor' | 'refactored'>('issues');
+
+  // Initialize with current project's generated Manifest XML & Kotlin code
   useEffect(() => {
     try {
       const generated: GeneratedCode = generateAndroidProject(config);
       if (generated && generated.manifest) {
         setManifestXml(generated.manifest);
-        // Automatically perform initial fast local audit
         const initialAudit = analyzeManifestLocally(generated.manifest);
         setAnalysisResult(initialAudit);
       } else {
         setManifestXml(SAMPLE_RISKY_MANIFEST);
         setAnalysisResult(analyzeManifestLocally(SAMPLE_RISKY_MANIFEST));
+      }
+
+      if (generated && generated.mainActivity) {
+        setKotlinCode(generated.mainActivity);
+        setKotlinLintResult(analyzeKotlinLocally(generated.mainActivity, config));
+      } else {
+        const fallbackKt = (mainActivityKtTemplate as string)
+          .replace(/{{PACKAGE_NAME}}/g, config.packageName)
+          .replace(/{{APP_NAME}}/g, config.appName)
+          .replace(/{{IS_DARK_THEME}}/g, 'true');
+        setKotlinCode(fallbackKt);
+        setKotlinLintResult(analyzeKotlinLocally(fallbackKt, config));
       }
     } catch (e) {
       setManifestXml(SAMPLE_RISKY_MANIFEST);
@@ -149,6 +174,70 @@ export const ManifestValidatorSection: React.FC<ManifestValidatorSectionProps> =
     setTimeout(() => setCopyStatus(null), 2000);
     addLog(`Copiado para a área de transferência: ${label}`, "info");
   };
+
+  // Run AI Kotlin Lint
+  const handleRunKotlinLint = async () => {
+    if (!kotlinCode.trim()) {
+      addLog("Erro: insira o código Kotlin para executar o lint.", "error");
+      return;
+    }
+
+    setRunningKotlinLint(true);
+    addLog("⚙️ Executando Static Kotlin Lint com IA Gemini...", "info");
+
+    try {
+      const result = await runAiKotlinLint(kotlinCode, config, config.modelName || 'gemini-3.6-flash');
+      setKotlinLintResult(result);
+      addLog(`✅ Lint Kotlin concluído! Score: ${result.score}/100. Encontradas ${result.issues.length} sugestões.`, "success");
+    } catch (err) {
+      addLog("Falha na análise Kotlin com IA. Executando análise sintática local...", "warning");
+      setKotlinLintResult(analyzeKotlinLocally(kotlinCode, config));
+    } finally {
+      setRunningKotlinLint(false);
+    }
+  };
+
+  // Apply single snippet fix
+  const handleApplySingleKotlinFix = (issue: KotlinLintIssue) => {
+    if (!issue.originalSnippet || !issue.fixedSnippet) return;
+    if (kotlinCode.includes(issue.originalSnippet)) {
+      const updatedKt = kotlinCode.replace(issue.originalSnippet, issue.fixedSnippet);
+      setKotlinCode(updatedKt);
+      setKotlinLintResult(analyzeKotlinLocally(updatedKt, config));
+      addLog(`Fix aplicado para '${issue.title}'!`, "success");
+    } else {
+      addLog(`Trecho original não localizado diretamente no código. Você pode aplicar a refatoração completa.`, "warning");
+    }
+  };
+
+  // Apply full refactored code
+  const handleApplyFullKotlinRefactoring = () => {
+    if (!kotlinLintResult?.refactoredCode) return;
+    setKotlinCode(kotlinLintResult.refactoredCode);
+    setKotlinLintResult(analyzeKotlinLocally(kotlinLintResult.refactoredCode, config));
+    addLog("Refatoração completa do código Kotlin aplicada com sucesso!", "success");
+  };
+
+  // Filtered Kotlin Lint Issues
+  const filteredKotlinIssues = useMemo(() => {
+    if (!kotlinLintResult?.issues) return [];
+    if (kotlinCategoryFilter === 'error') {
+      return kotlinLintResult.issues.filter(i => i.severity === 'error');
+    }
+    if (kotlinCategoryFilter === 'performance') {
+      return kotlinLintResult.issues.filter(i => i.category === 'performance');
+    }
+    if (kotlinCategoryFilter === 'security') {
+      return kotlinLintResult.issues.filter(i => i.category === 'security');
+    }
+    if (kotlinCategoryFilter === 'memory') {
+      return kotlinLintResult.issues.filter(i => i.category === 'memory');
+    }
+    if (kotlinCategoryFilter === 'coroutines') {
+      return kotlinLintResult.issues.filter(i => i.category === 'coroutines');
+    }
+    return kotlinLintResult.issues;
+  }, [kotlinLintResult, kotlinCategoryFilter]);
 
   // Filtered permissions list
   const filteredPermissions = useMemo(() => {
@@ -315,6 +404,19 @@ export const ManifestValidatorSection: React.FC<ManifestValidatorSectionProps> =
             {securityIssuesCount > 0 && (
               <span className="ml-1.5 px-1.5 py-0.2 bg-rose-500 text-white rounded-full text-[9px]">
                 {securityIssuesCount}
+              </span>
+            )}
+          </button>
+          <button
+            onClick={() => setActiveSubTab('kotlinLint')}
+            className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all relative flex items-center gap-1.5 ${
+              activeSubTab === 'kotlinLint' ? 'bg-indigo-600 text-white shadow' : 'text-slate-400 hover:text-white'
+            }`}
+          >
+            <span>⚙️ Kotlin Lint (IA)</span>
+            {kotlinLintResult && kotlinLintResult.issues.length > 0 && (
+              <span className="px-1.5 py-0.2 bg-indigo-500 text-white rounded-full text-[9px] font-mono font-bold">
+                {kotlinLintResult.issues.length}
               </span>
             )}
           </button>
@@ -490,6 +592,317 @@ export const ManifestValidatorSection: React.FC<ManifestValidatorSectionProps> =
                   </div>
                 </div>
               ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* SUBTAB KOTLIN LINT: STATIC CODE ANALYSIS & BEST PRACTICES */}
+      {activeSubTab === 'kotlinLint' && (
+        <div className="space-y-5">
+          {/* Top Control Header */}
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-slate-900/80 p-4 rounded-xl border border-indigo-500/30">
+            <div className="space-y-0.5">
+              <h3 className="text-xs font-black uppercase tracking-wider text-indigo-300 flex items-center gap-2">
+                <span>⚙️ Audit & Static Linting de Código Kotlin (`MainActivity.kt`)</span>
+              </h3>
+              <p className="text-[11px] text-slate-400">
+                Análise sintática avançada baseada em regras do Android Studio, prevenindo vazamentos de memória (Memory Leaks), escopos globais de Corrotinas e más práticas de null-safety.
+              </p>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2 shrink-0">
+              <button
+                onClick={handleRunKotlinLint}
+                disabled={runningKotlinLint}
+                className={`px-4 py-2 bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white font-extrabold text-xs uppercase tracking-wider rounded-xl shadow-lg transition-transform active:scale-95 flex items-center gap-2 ${
+                  runningKotlinLint ? 'opacity-50 cursor-wait' : ''
+                }`}
+              >
+                <span>{runningKotlinLint ? '⏳ Analisando Kotlin...' : '⚡ Executar Lint IA'}</span>
+              </button>
+
+              {kotlinLintResult?.refactoredCode && (
+                <button
+                  onClick={handleApplyFullKotlinRefactoring}
+                  className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs rounded-xl shadow transition-colors flex items-center gap-1.5"
+                  title="Substituir código atual pela versão refatorada e limpa emitida pela IA"
+                >
+                  <span>🔧 Aplicar Refatoração IA</span>
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Kotlin Code Score & Summary Card */}
+          {kotlinLintResult && (
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-4 bg-black/40 p-4 rounded-xl border border-white/10">
+              {/* Score Gauge */}
+              <div className="md:col-span-1 flex flex-col items-center justify-center p-3 bg-slate-900/90 rounded-xl border border-white/10 text-center space-y-2">
+                <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Score de Qualidade Kotlin</span>
+                <div
+                  className={`w-20 h-20 rounded-full flex flex-col items-center justify-center border-4 shadow-xl ${
+                    kotlinLintResult.score >= 85
+                      ? 'border-emerald-500 bg-emerald-500/10 text-emerald-400 shadow-emerald-500/10'
+                      : kotlinLintResult.score >= 60
+                      ? 'border-amber-500 bg-amber-500/10 text-amber-400 shadow-amber-500/10'
+                      : 'border-rose-500 bg-rose-500/10 text-rose-400 shadow-rose-500/10'
+                  }`}
+                >
+                  <span className="text-2xl font-black">{kotlinLintResult.score}</span>
+                  <span className="text-[8px] font-bold uppercase text-slate-400">/ 100</span>
+                </div>
+                <span className="text-[9px] font-bold uppercase text-slate-300">
+                  {kotlinLintResult.score >= 85 ? '✅ Código Limpo e Eficiente' : '⚠️ Requer Ajustes de Lint'}
+                </span>
+              </div>
+
+              {/* Summary and Metrics */}
+              <div className="md:col-span-3 flex flex-col justify-between space-y-3">
+                <div className="space-y-1.5">
+                  <span className="text-[10px] font-bold text-indigo-400 uppercase tracking-wider block">Resumo do Diagnóstico de Código</span>
+                  <p className="text-xs text-slate-300 bg-slate-900/80 p-3 rounded-xl border border-white/5 leading-relaxed font-sans">
+                    {kotlinLintResult.summary}
+                  </p>
+                </div>
+
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                  <div className="bg-slate-900 p-2 rounded-lg border border-white/5 text-center">
+                    <p className="text-[9px] text-slate-400 uppercase font-bold">Total Observações</p>
+                    <p className="text-sm font-black text-white">{kotlinLintResult.issues.length}</p>
+                  </div>
+                  <div className="bg-slate-900 p-2 rounded-lg border border-white/5 text-center">
+                    <p className="text-[9px] text-slate-400 uppercase font-bold">Erros Críticos</p>
+                    <p className={`text-sm font-black ${kotlinLintResult.metrics.errorsCount > 0 ? 'text-rose-400' : 'text-emerald-400'}`}>
+                      {kotlinLintResult.metrics.errorsCount}
+                    </p>
+                  </div>
+                  <div className="bg-slate-900 p-2 rounded-lg border border-white/5 text-center">
+                    <p className="text-[9px] text-slate-400 uppercase font-bold">Performance</p>
+                    <p className="text-sm font-black text-indigo-400">{kotlinLintResult.metrics.performanceCount}</p>
+                  </div>
+                  <div className="bg-slate-900 p-2 rounded-lg border border-white/5 text-center">
+                    <p className="text-[9px] text-slate-400 uppercase font-bold">Segurança</p>
+                    <p className="text-sm font-black text-amber-400">{kotlinLintResult.metrics.securityCount}</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Sub Navigation / View Mode & Filters */}
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-black/40 p-2.5 rounded-xl border border-white/10">
+            {/* View Mode Toggle */}
+            <div className="flex gap-1">
+              <button
+                onClick={() => setKotlinViewMode('issues')}
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
+                  kotlinViewMode === 'issues' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                📋 Diagnóstico Lint ({kotlinLintResult?.issues.length || 0})
+              </button>
+              <button
+                onClick={() => setKotlinViewMode('editor')}
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
+                  kotlinViewMode === 'editor' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                📝 Código Kotlin Atual
+              </button>
+              <button
+                onClick={() => setKotlinViewMode('refactored')}
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
+                  kotlinViewMode === 'refactored' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                ✨ Versão Refatorada IA
+              </button>
+            </div>
+
+            {/* Category Filter Pills */}
+            {kotlinViewMode === 'issues' && (
+              <div className="flex flex-wrap gap-1 items-center">
+                <span className="text-[9px] uppercase font-bold text-slate-500 mr-1">Filtrar:</span>
+                <button
+                  onClick={() => setKotlinCategoryFilter('all')}
+                  className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                    kotlinCategoryFilter === 'all' ? 'bg-slate-700 text-white' : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  Todas
+                </button>
+                <button
+                  onClick={() => setKotlinCategoryFilter('error')}
+                  className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                    kotlinCategoryFilter === 'error' ? 'bg-rose-600 text-white' : 'text-rose-400 hover:text-rose-300'
+                  }`}
+                >
+                  Erros
+                </button>
+                <button
+                  onClick={() => setKotlinCategoryFilter('performance')}
+                  className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                    kotlinCategoryFilter === 'performance' ? 'bg-indigo-600 text-white' : 'text-indigo-400 hover:text-indigo-300'
+                  }`}
+                >
+                  Performance
+                </button>
+                <button
+                  onClick={() => setKotlinCategoryFilter('coroutines')}
+                  className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                    kotlinCategoryFilter === 'coroutines' ? 'bg-purple-600 text-white' : 'text-purple-400 hover:text-purple-300'
+                  }`}
+                >
+                  Corrotinas/Memória
+                </button>
+              </div>
+            )}
+          </div>
+
+          {/* VIEW MODE 1: DIAGNOSTIC ISSUES LIST */}
+          {kotlinViewMode === 'issues' && (
+            <div className="space-y-3">
+              {filteredKotlinIssues.length === 0 ? (
+                <div className="p-8 text-center text-xs text-emerald-400 bg-emerald-950/20 rounded-xl border border-emerald-500/30 font-bold">
+                  🎉 Nenhum problema de Lint encontrado nesta categoria! O código Kotlin atende às regras do Android Studio.
+                </div>
+              ) : (
+                filteredKotlinIssues.map((issue, idx) => (
+                  <div
+                    key={idx}
+                    className={`p-4 rounded-xl border transition-all space-y-3 ${
+                      issue.severity === 'error'
+                        ? 'bg-rose-950/20 border-rose-500/40'
+                        : issue.severity === 'warning'
+                        ? 'bg-amber-950/20 border-amber-500/40'
+                        : 'bg-slate-900/80 border-indigo-500/30'
+                    }`}
+                  >
+                    {/* Header */}
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-white/5 pb-2">
+                      <div className="flex items-center gap-2">
+                        <span className="font-mono text-[10px] font-bold px-2 py-0.5 bg-black/50 text-indigo-300 rounded border border-white/10">
+                          {issue.ruleId}
+                        </span>
+                        <h4 className="text-xs font-bold text-white">{issue.title}</h4>
+                      </div>
+
+                      <div className="flex items-center gap-2 shrink-0">
+                        <span
+                          className={`text-[9px] font-black uppercase px-2 py-0.5 rounded border ${
+                            issue.severity === 'error'
+                              ? 'bg-rose-500/20 border-rose-500/40 text-rose-300'
+                              : issue.severity === 'warning'
+                              ? 'bg-amber-500/20 border-amber-500/40 text-amber-300'
+                              : 'bg-indigo-500/20 border-indigo-500/40 text-indigo-300'
+                          }`}
+                        >
+                          {issue.severity}
+                        </span>
+
+                        <span className="text-[9px] font-bold uppercase px-2 py-0.5 bg-slate-800 text-slate-300 rounded border border-slate-700">
+                          {issue.category}
+                        </span>
+
+                        <button
+                          onClick={() => handleApplySingleKotlinFix(issue)}
+                          className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-[10px] rounded-lg shadow transition-transform active:scale-95 flex items-center gap-1"
+                          title="Substituir este trecho diretamente no código Kotlin"
+                        >
+                          <span>🔧 Corrigir Trecho</span>
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Explanation & Android Studio Tip */}
+                    <div className="space-y-2 text-xs">
+                      <p className="text-slate-300 leading-relaxed">{issue.explanation}</p>
+
+                      {issue.androidStudioTip && (
+                        <div className="bg-indigo-950/40 p-2.5 rounded-lg border border-indigo-500/20 text-[11px] text-indigo-200 flex items-start gap-2">
+                          <span className="shrink-0">💡</span>
+                          <span><strong>Dica do Android Studio:</strong> {issue.androidStudioTip}</span>
+                        </div>
+                      )}
+
+                      {/* Code Snippet Comparison */}
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-2 pt-1 font-mono text-[10px]">
+                        <div className="bg-rose-950/30 p-2.5 rounded-lg border border-rose-500/30 space-y-1">
+                          <span className="text-rose-400 font-bold uppercase text-[9px] font-sans block">Código Atual (Sintaxe / Risco):</span>
+                          <code className="text-rose-200 block overflow-x-auto whitespace-pre-wrap">{issue.originalSnippet}</code>
+                        </div>
+
+                        <div className="bg-emerald-950/30 p-2.5 rounded-lg border border-emerald-500/30 space-y-1">
+                          <span className="text-emerald-400 font-bold uppercase text-[9px] font-sans block">Correção Recomendada (Boas Práticas):</span>
+                          <code className="text-emerald-200 block overflow-x-auto whitespace-pre-wrap">{issue.fixedSnippet}</code>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          )}
+
+          {/* VIEW MODE 2: CURRENT KOTLIN CODE EDITOR */}
+          {kotlinViewMode === 'editor' && (
+            <div className="space-y-3">
+              <div className="flex items-center justify-between text-xs text-slate-400">
+                <span className="font-mono text-[10px]">Código Kotlin Atual (`app/src/main/java/.../MainActivity.kt`)</span>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => handleCopyText(kotlinCode, 'MainActivity.kt')}
+                    className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded text-[10px] border border-white/10"
+                  >
+                    {copyStatus === 'MainActivity.kt' ? '✓ Copiado' : '📋 Copiar'}
+                  </button>
+                  <button
+                    onClick={() => {
+                      setKotlinLintResult(analyzeKotlinLocally(kotlinCode, config));
+                      addLog("Reanalisado código Kotlin editado manualmente.", "info");
+                    }}
+                    className="px-2.5 py-1 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded text-[10px]"
+                  >
+                    🔄 Reanalisar Local
+                  </button>
+                </div>
+              </div>
+
+              <textarea
+                value={kotlinCode}
+                onChange={e => setKotlinCode(e.target.value)}
+                rows={18}
+                className="w-full bg-slate-950 border border-white/10 rounded-xl p-4 font-mono text-xs text-slate-100 focus:outline-none focus:border-indigo-500 leading-relaxed select-all"
+                placeholder="Código Kotlin da MainActivity.kt..."
+              />
+            </div>
+          )}
+
+          {/* VIEW MODE 3: FULL REFACTORED KOTLIN CODE PREVIEW */}
+          {kotlinViewMode === 'refactored' && (
+            <div className="space-y-3">
+              <div className="flex items-center justify-between text-xs text-slate-400">
+                <span className="font-mono text-[10px]">Versão Totalmente Refatorada e Otimizada pela IA</span>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => handleCopyText(kotlinLintResult?.refactoredCode || kotlinCode, 'Refactored MainActivity.kt')}
+                    className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded text-[10px] border border-white/10"
+                  >
+                    {copyStatus === 'Refactored MainActivity.kt' ? '✓ Copiado' : '📋 Copiar'}
+                  </button>
+                  <button
+                    onClick={handleApplyFullKotlinRefactoring}
+                    className="px-3 py-1 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded text-[10px]"
+                  >
+                    🚀 Aplicar no Projeto
+                  </button>
+                </div>
+              </div>
+
+              <pre className="bg-slate-950 p-4 rounded-xl font-mono text-xs text-emerald-300 overflow-x-auto max-h-[450px] leading-relaxed border border-indigo-500/30 select-all">
+                {kotlinLintResult?.refactoredCode || kotlinCode}
+              </pre>
             </div>
           )}
         </div>

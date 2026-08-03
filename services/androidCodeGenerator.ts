@@ -248,8 +248,8 @@ android {
         applicationId '${config.packageName}'
         minSdk 24
         targetSdk 34
-        versionCode 1
-        versionName "1.0"
+        versionCode ${config.versionCode || 1}
+        versionName "${config.versionName || '1.0.0'}"
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -289,6 +289,7 @@ dependencies {
     implementation 'com.google.android.material:material:1.9.0'
     implementation 'androidx.constraintlayout:constraintlayout:2.1.4'
     implementation 'androidx.recyclerview:recyclerview:1.3.0'
+    implementation 'androidx.security:security-crypto:1.1.0-alpha06'
 }
 `;
 

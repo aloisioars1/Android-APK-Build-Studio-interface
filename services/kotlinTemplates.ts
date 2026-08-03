@@ -18,6 +18,13 @@ import android.os.Handler
 import android.os.Looper
 import androidx.core.content.ContextCompat
 import androidx.constraintlayout.widget.ConstraintLayout
+import android.content.SharedPreferences
+import android.content.ClipboardManager
+import android.content.ClipData
+import android.widget.Toast
+import androidx.appcompat.app.AppCompatDelegate
+import androidx.security.crypto.EncryptedSharedPreferences
+import androidx.security.crypto.MasterKey
 
 class MainActivity : AppCompatActivity() {
 
@@ -40,6 +47,68 @@ class MainActivity : AppCompatActivity() {
         buttonSend = findViewById(R.id.buttonSend)
 
         setupChat()
+        initFinancialModules()
+    }
+
+    /**
+     * Persistência Segura com EncryptedSharedPreferences (AES-256 GCM)
+     */
+    private fun getEncryptedPreferences(): SharedPreferences {
+        val masterKey = MasterKey.Builder(this)
+            .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
+            .build()
+
+        return EncryptedSharedPreferences.create(
+            this,
+            "encrypted_app_secrets",
+            masterKey,
+            EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SKEY,
+            EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
+        )
+    }
+
+    fun saveGithubTokenSecured(token: String) {
+        getEncryptedPreferences().edit().putString("PAT_TOKEN", token).apply()
+        Toast.makeText(this, "PAT salvo com criptografia AES-256!", Toast.LENGTH_SHORT).show()
+    }
+
+    fun getGithubTokenSecured(): String? {
+        return getEncryptedPreferences().getString("PAT_TOKEN", null)
+    }
+
+    /**
+     * Módulo de Gestão Financeira, Metas e Estatísticas
+     */
+    private fun initFinancialModules() {
+        // Exemplo de inclusão de meta inicial
+        messageList.add(Message("Finance Pro", "💰 Meta Ativa: Reserva de Emergência (R$ 5.000,00)\n📊 Clique em Copiar PIX para depositar na meta."))
+    }
+
+    fun copyPixKeyToClipboard(pixKey: String = "00020126360014BR.GOV.BCB.PIX0114+5511999999999520400005303986540510.005802BR5915Heavy Financeiro6009SAO PAULO62070503***6304E2CA") {
+        val clipboard = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
+        val clip = ClipData.newPlainText("Chave PIX Meta Financeira", pixKey)
+        clipboard.setPrimaryClip(clip)
+        Toast.makeText(this, "Chave PIX da meta copiada com sucesso!", Toast.LENGTH_LONG).show()
+    }
+
+    fun exportTransactionsToCsv(): String {
+        val csv = StringBuilder()
+        csv.append("Data,Categoria,Descricao,Valor\n")
+        csv.append("2026-08-01,Alimentacao,Mercado Central,350.50\n")
+        csv.append("2026-08-02,Moradia,Aluguel Residencial,1500.00\n")
+        csv.append("2026-08-03,Investimento,Aporte Meta PIX,200.00\n")
+        
+        Toast.makeText(this, "Planilha CSV gerada com sucesso!", Toast.LENGTH_SHORT).show()
+        return csv.toString()
+    }
+
+    fun toggleAppTheme() {
+        val currentMode = AppCompatDelegate.getDefaultNightMode()
+        if (currentMode == AppCompatDelegate.MODE_NIGHT_YES) {
+            AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_NO)
+        } else {
+            AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_YES)
+        }
     }
 
     private fun setupChat() {
@@ -47,7 +116,7 @@ class MainActivity : AppCompatActivity() {
         recyclerViewChat.layoutManager = LinearLayoutManager(this)
         recyclerViewChat.adapter = chatAdapter
 
-        messageList.add(Message("HeavyMobile AI", "Olá! Como posso ajudar você hoje? O layout do chat agora está otimizado."))
+        messageList.add(Message("HeavyMobile AI", "Olá! Como posso ajudar você hoje no controle financeiro e builds?"))
         chatAdapter.notifyItemInserted(messageList.size - 1)
 
         buttonSend.setOnClickListener {
@@ -59,8 +128,14 @@ class MainActivity : AppCompatActivity() {
             recyclerViewChat.scrollToPosition(messageList.size - 1)
             editTextMessage.setText("") 
 
+            if (messageText.lowercase().contains("pix")) {
+                copyPixKeyToClipboard()
+            } else if (messageText.lowercase().contains("csv") || messageText.lowercase().contains("planilha")) {
+                exportTransactionsToCsv()
+            }
+
             Handler(Looper.getMainLooper()).postDelayed({
-                val aiResponse = "Sincronização neural completa. Note como as bolhas de chat agora se alinham e mudam de cor dinamicamente."
+                val aiResponse = "Processado! Transação e comandos validados com segurança."
                 messageList.add(Message("HeavyMobile AI", aiResponse))
                 chatAdapter.notifyItemInserted(messageList.size - 1)
                 recyclerViewChat.scrollToPosition(messageList.size - 1)
@@ -96,19 +171,15 @@ class MainActivity : AppCompatActivity() {
                 val layoutParams = messageCard.layoutParams as ConstraintLayout.LayoutParams
                 
                 if (message.sender == "Você") {
-                    // Estilo do Usuário (Direita)
                     messageCard.setCardBackgroundColor(ContextCompat.getColor(itemView.context, if (isDarkTheme) R.color.chat_bubble_user_dark else R.color.chat_bubble_user_light))
                     textViewMessage.setTextColor(ContextCompat.getColor(itemView.context, R.color.chat_text_user))
                     textViewSender.setTextColor(ContextCompat.getColor(itemView.context, R.color.chat_sender_user))
-                    
-                    layoutParams.horizontalBias = 1.0f // Alinha à direita
+                    layoutParams.horizontalBias = 1.0f
                 } else {
-                    // Estilo da IA (Esquerda)
                     messageCard.setCardBackgroundColor(ContextCompat.getColor(itemView.context, if (isDarkTheme) R.color.chat_bubble_ai_dark else R.color.chat_bubble_ai_light))
                     textViewMessage.setTextColor(ContextCompat.getColor(itemView.context, if (isDarkTheme) R.color.chat_text_ai_dark else R.color.chat_text_ai_light))
                     textViewSender.setTextColor(ContextCompat.getColor(itemView.context, if (isDarkTheme) R.color.chat_sender_ai_dark else R.color.chat_sender_ai_light))
-                    
-                    layoutParams.horizontalBias = 0.0f // Alinha à esquerda
+                    layoutParams.horizontalBias = 0.0f
                 }
                 
                 messageCard.layoutParams = layoutParams

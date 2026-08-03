@@ -453,16 +453,38 @@ const AndroidPreview: React.FC<AndroidPreviewProps> = ({
   useLayoutEffect(() => {
     const handleResize = () => {
       if (!containerRef.current) return;
-      const availableHeight = containerRef.current.clientHeight - 60;
-      const availableWidth = containerRef.current.clientWidth - 24;
+      const ch = containerRef.current.clientHeight;
+      const cw = containerRef.current.clientWidth;
+      if (ch <= 0 || cw <= 0) {
+        setScale(0.75);
+        return;
+      }
+      const availableHeight = ch - 50;
+      const availableWidth = cw - 16;
       const hScale = availableHeight / selectedDevice.height;
       const wScale = availableWidth / selectedDevice.width;
-      setScale(Math.max(0.25, Math.min(hScale, wScale, 1))); 
+      const computedScale = Math.min(hScale, wScale, 1);
+      setScale(Math.max(0.4, Number.isNaN(computedScale) ? 0.75 : computedScale)); 
     };
+
     handleResize();
+
+    const observer = new ResizeObserver(() => {
+      handleResize();
+    });
+
+    if (containerRef.current) {
+      observer.observe(containerRef.current);
+    }
+
     window.addEventListener('resize', handleResize);
-    setTimeout(handleResize, 100);
-    return () => window.removeEventListener('resize', handleResize);
+    const timer = setTimeout(handleResize, 150);
+
+    return () => {
+      observer.disconnect();
+      window.removeEventListener('resize', handleResize);
+      clearTimeout(timer);
+    };
   }, [selectedDeviceId]);
 
   useEffect(() => {

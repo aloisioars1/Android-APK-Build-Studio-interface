@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { GoogleGenAI, Modality } from "@google/genai";
-import { AppConfig, TabType, GeneratedCode, AppAsset, ConversationMessage } from './types';
+import { AppConfig, TabType, GeneratedCode, AppAsset, ConversationMessage, SavedIcon } from './types';
 import { Icons } from './constants';
 import { generateAndroidProject } from './services/androidCodeGenerator';
 import { generateIconWithAi, generateAutomaticIconBase64 } from './services/iconAiGenerator';
@@ -17,7 +17,13 @@ import AabExplorer from './components/AabExplorer';
 import FirebaseDistributionManager from './components/FirebaseDistributionManager';
 import ManifestValidatorSection from './components/ManifestValidatorSection';
 import ReadmeManagerSection from './components/ReadmeManagerSection';
+import WorkflowGallerySection from './components/WorkflowGallerySection';
+import GooglePlayPublisherManager from './components/GooglePlayPublisherManager';
+import { PrefabComponentLibrary } from './components/PrefabComponentLibrary';
 import { generateKotlinDocumentation } from './services/kotlinDocGenerator';
+import { saveProjectToIndexedDB, loadProjectFromIndexedDB, clearProjectIndexedDBCache } from './services/indexedDbService';
+import { exportHeavyStudioConfig, importHeavyStudioConfig } from './services/heavyStudioConfigService';
+import { exportBrandingAssetsZip } from './services/brandingAssetsService';
 import JSZip from 'jszip';
 
 const initialConversationHistory: ConversationMessage[] = [
@@ -45,6 +51,7 @@ const App: React.FC = () => {
       githubUser: '',
       githubRepo: 'heavy-project',
       githubToken: '',
+      apiKey: '',
       googleProjectId: '',
       cloudRegion: 'us-central1',
       assets: [],
@@ -64,9 +71,25 @@ const App: React.FC = () => {
       6. Nunca peça desculpas, apenas execute. Seja técnica e direta.`,
       useSearch: true,
       thinkingBudget: 16384,
-      temperature: 0.7
+      temperature: 0.7,
+      versionCode: 1,
+      versionName: '1.0.0'
     };
   });
+
+  const incrementVersion = () => {
+    setConfig(prev => {
+      const currentCode = prev.versionCode || 1;
+      const nextCode = currentCode + 1;
+      const nextName = `1.0.${nextCode}`;
+      addLog(`📱 Versão do App incrementada automaticamente: v${nextName} (build ${nextCode})`, "info");
+      return {
+        ...prev,
+        versionCode: nextCode,
+        versionName: nextName
+      };
+    });
+  };
 
   const [activeTab, setActiveTab] = useState<TabType>(TabType.PREVIEW);
   const [generated, setGenerated] = useState<GeneratedCode | null>(null);
@@ -77,14 +100,171 @@ const App: React.FC = () => {
   const [isSyncing, setIsSyncing] = useState(false);
   const [isBuildingApk, setIsBuildingApk] = useState(false);
   const [isGeneratingIcon, setIsGeneratingIcon] = useState(false);
+  const [iconGallery, setIconGallery] = useState<SavedIcon[]>(() => {
+    try {
+      const saved = localStorage.getItem('heavy_studio_icon_gallery');
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
   const [showKotlinDocModal, setShowKotlinDocModal] = useState(false);
+  const [showDownloadsModal, setShowDownloadsModal] = useState(false);
   const [kotlinDocMarkdown, setKotlinDocMarkdown] = useState<string>('');
   const [copiedDoc, setCopiedDoc] = useState(false);
+
+  const handleDownloadSingleFile = (filename: string, content: string, mimeType: string = 'text/plain;charset=utf-8') => {
+    const blob = new Blob([content], { type: mimeType });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    link.click();
+    addLog(`📥 Arquivo ${filename} baixado com sucesso.`, "success");
+  };
+
+  const handleResetNewApp = () => {
+    if (window.confirm("🧹 Deseja limpar a tela e criar um Novo Aplicativo do zero? Os dados e histórico do app atual serão redefinidos.")) {
+      const cleanConfig: AppConfig = {
+        ...config,
+        appName: 'Novo App Pro',
+        webLink: '',
+        uploadEndpoint: '',
+        packageName: 'com.heavy.novoapp',
+        iconLabel: 'NA',
+        iconColor: '#2563eb',
+        iconFileName: 'ic_launcher',
+        iconType: 'text',
+        iconType_old: 'text',
+        iconTextColor: '#FFFFFF',
+        uploadedIcon: undefined,
+        iconPrompt: '',
+        googleProjectId: '',
+        assets: [],
+        components: [],
+        versionCode: 1,
+        versionName: '1.0.0',
+        playConsoleReleaseNotes: '',
+      };
+
+      setConfig(cleanConfig);
+      setConversationHistory([
+        { role: 'model', text: '✨ Tela limpa com sucesso! O ambiente de desenvolvimento está pronto para o seu Novo Aplicativo. Digite o que deseja criar ou cole a URL do seu site para começar.' }
+      ]);
+      setLogs([]);
+      setAttachments([]);
+      setAiPrompt('');
+      setActiveTab(TabType.PREVIEW);
+
+      try {
+        localStorage.setItem('heavy_studio_config', JSON.stringify(cleanConfig));
+        clearProjectIndexedDBCache();
+      } catch (e) {
+        console.error(e);
+      }
+
+      addLog("🧹 Tela limpa com sucesso! Novo projeto e cache offline inicializados.", "success");
+    }
+  };
+
+  const handleDownloadIconPng = () => {
+    if (!config.uploadedIcon?.data) return;
+    const link = document.createElement("a");
+    link.href = `data:image/png;base64,${config.uploadedIcon.data}`;
+    link.download = `ic_launcher_${config.appName.replace(/\s+/g, '_')}.png`;
+    link.click();
+    addLog("🎨 Ícone ic_launcher.png baixado com sucesso.", "success");
+  };
   const [conversationHistory, setConversationHistory] = useState<ConversationMessage[]>(initialConversationHistory);
   const [logs, setLogs] = useState<{msg: string, type: string}[]>([]);
+  const [isOnline, setIsOnline] = useState<boolean>(navigator.onLine);
+  const [lastSavedTime, setLastSavedTime] = useState<string | null>(null);
+  const isIndexedDBLoaded = useRef<boolean>(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const configFileInputRef = useRef<HTMLInputElement>(null);
+  const iconFileInputRef = useRef<HTMLInputElement>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
+
+  // Monitor Network & Restore from IndexedDB on startup
+  useEffect(() => {
+    const handleOnline = () => {
+      setIsOnline(true);
+      addLog("🟢 Conexão com a Internet estabelecida.", "info");
+    };
+    const handleOffline = () => {
+      setIsOnline(false);
+      addLog("📶 Conexão de rede perdida. Todo o seu progresso e logs estão sendo salvos no cache IndexedDB!", "warning");
+    };
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+
+    const initCache = async () => {
+      try {
+        const cached = await loadProjectFromIndexedDB();
+        if (cached) {
+          if (cached.config) setConfig(cached.config);
+          if (cached.logs && cached.logs.length > 0) setLogs(cached.logs);
+          if (cached.conversationHistory && cached.conversationHistory.length > 0) setConversationHistory(cached.conversationHistory);
+          if (cached.iconGallery) setIconGallery(cached.iconGallery);
+          if (cached.attachments) setAttachments(cached.attachments);
+          if (cached.activeTab) setActiveTab(cached.activeTab);
+          if (cached.generated) setGenerated(cached.generated);
+
+          const timeStr = new Date(cached.lastSavedAt).toLocaleTimeString();
+          setLastSavedTime(timeStr);
+          setLogs(prev => [
+            { msg: `[${new Date().toLocaleTimeString()}] 💾 Cache offline IndexedDB restaurado com sucesso! (Salvo às ${timeStr})`, type: 'success' },
+            ...prev
+          ].slice(0, 30));
+        }
+      } catch (err) {
+        console.error("Erro ao carregar cache do IndexedDB:", err);
+      } finally {
+        isIndexedDBLoaded.current = true;
+      }
+    };
+
+    initCache();
+
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
+
+  // Debounced auto-save to IndexedDB whenever relevant state changes
+  useEffect(() => {
+    if (!isIndexedDBLoaded.current) return;
+
+    const timer = setTimeout(async () => {
+      try {
+        await saveProjectToIndexedDB({
+          config,
+          logs,
+          conversationHistory,
+          iconGallery,
+          attachments,
+          activeTab,
+          generated
+        });
+        setLastSavedTime(new Date().toLocaleTimeString());
+      } catch (e) {
+        console.error("Erro ao salvar no IndexedDB:", e);
+      }
+    }, 600);
+
+    return () => clearTimeout(timer);
+  }, [config, logs, conversationHistory, iconGallery, attachments, activeTab, generated]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('heavy_studio_icon_gallery', JSON.stringify(iconGallery));
+    } catch (e) {
+      console.error('Erro ao salvar galeria de ícones no localStorage:', e);
+    }
+  }, [iconGallery]);
 
   useEffect(() => {
     localStorage.setItem('heavy_studio_config', JSON.stringify(config));
@@ -108,12 +288,25 @@ const App: React.FC = () => {
     setIsGeneratingIcon(true);
     addLog(`🎨 Gerando ic_launcher.png (Base64) com IA para "${config.appName}"...`, "info");
     try {
-      const base64Data = await generateAutomaticIconBase64(config.appName, config.appDescription, promptToUse);
+      const base64Data = await generateAutomaticIconBase64(config.appName, config.appDescription, promptToUse, config.apiKey);
       const iconAsset: AppAsset = {
         name: 'ic_launcher.png',
         data: base64Data,
         mimeType: 'image/png'
       };
+
+      const newSavedIcon: SavedIcon = {
+        id: 'icon_' + Date.now(),
+        data: base64Data,
+        prompt: promptToUse,
+        timestamp: Date.now()
+      };
+
+      setIconGallery(prev => {
+        const filtered = prev.filter(item => item.data !== base64Data);
+        return [newSavedIcon, ...filtered].slice(0, 20);
+      });
+
       setConfig(prev => ({
         ...prev,
         iconType: 'image',
@@ -126,6 +319,27 @@ const App: React.FC = () => {
     } finally {
       setIsGeneratingIcon(false);
     }
+  };
+
+  const handleSelectGalleryIcon = (iconItem: SavedIcon) => {
+    const iconAsset: AppAsset = {
+      name: 'ic_launcher.png',
+      data: iconItem.data,
+      mimeType: 'image/png'
+    };
+    setConfig(prev => ({
+      ...prev,
+      iconType: 'image',
+      uploadedIcon: iconAsset,
+      iconPrompt: iconItem.prompt || prev.iconPrompt
+    }));
+    addLog("🎨 Ícone selecionado da galeria e aplicado ao projeto!", "info");
+  };
+
+  const handleDeleteGalleryIcon = (id: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setIconGallery(prev => prev.filter(item => item.id !== id));
+    addLog("🗑️ Ícone removido da galeria local.", "info");
   };
 
   const handleOpenKotlinDocsModal = () => {
@@ -156,9 +370,10 @@ const App: React.FC = () => {
 
   const handleDownloadProject = async () => {
     if (!generated) return;
-    addLog("Preparando pacote de código...", "info");
+    addLog("Preparando pacote de código com pasta de downloads...", "info");
     const zip = new JSZip();
     const projectFolder = zip.folder(config.platform === 'android' ? "android" : "ios");
+    const downloadFolder = zip.folder("download");
     
     if (config.platform === 'android') {
       const docMd = generateKotlinDocumentation(generated.mainActivity, config, generated);
@@ -173,14 +388,31 @@ const App: React.FC = () => {
       projectFolder?.file("settings.gradle", generated.settingsGradle);
       projectFolder?.file("DOCUMENTATION.md", docMd);
       zip.file("DOCUMENTATION.md", docMd);
+
+      // Inclui arquivos na pasta /download
+      downloadFolder?.file("DOCUMENTATION.md", docMd);
+      downloadFolder?.file("AndroidManifest.xml", generated.manifest);
+      downloadFolder?.file("MainActivity.kt", generated.mainActivity);
+      downloadFolder?.file("build.gradle", generated.buildGradleApp);
+      downloadFolder?.file("LEIA_ME_DOWNLOADS.txt", `PASTA DE DOWNLOADS DO PROJETO ${config.appName}\n\nEste diretório contém os principais arquivos do projeto prontos para uso:\n- DOCUMENTATION.md: Análise sintática e documentação em Markdown\n- AndroidManifest.xml: Configurações e permissões do Android\n- MainActivity.kt: Código fonte principal da Activity\n- build.gradle: Configurações de dependências e Gradle\n${config.uploadedIcon?.data ? "- ic_launcher.png: Ícone do aplicativo em Base64/PNG\n" : ""}\nGerado via Heavy Mobile Studio Build.`);
+
+      if (config.uploadedIcon?.data) {
+        downloadFolder?.file("ic_launcher.png", config.uploadedIcon.data, { base64: true });
+      }
+
       if (generated.githubWorkflow) {
         projectFolder?.file(generated.workflowPath || ".github/workflows/android.yml", generated.githubWorkflow);
+        downloadFolder?.file("android-ci-workflow.yml", generated.githubWorkflow);
       }
     } else {
       projectFolder?.file("ContentView.swift", generated.contentViewSwift);
       projectFolder?.file("MainApp.swift", generated.mainAppSwift);
       projectFolder?.file("Package.swift", generated.packageSwift);
       projectFolder?.file("Info.plist", generated.infoPlist);
+
+      downloadFolder?.file("ContentView.swift", generated.contentViewSwift);
+      downloadFolder?.file("Info.plist", generated.infoPlist);
+      downloadFolder?.file("LEIA_ME_DOWNLOADS.txt", `PASTA DE DOWNLOADS DO PROJETO ${config.appName} (iOS)`);
     }
 
     const content = await zip.generateAsync({ type: "blob" });
@@ -189,12 +421,13 @@ const App: React.FC = () => {
     link.href = url;
     link.download = `${config.appName.replace(/\s+/g, '_')}_${config.platform.toUpperCase()}.zip`;
     link.click();
-    addLog("Projeto exportado com sucesso (incluindo DOCUMENTATION.md na raiz).", "success");
+    addLog("Projeto exportado com sucesso (incluindo a pasta /download com todos os arquivos).", "success");
   };
 
   const handleDownloadAab = async () => {
     if (!generated) return;
-    addLog("Exportando Android App Bundle (.aab)...", "info");
+    incrementVersion();
+    addLog("Exportando Android App Bundle (.aab) assinado com incremento de versão...", "info");
     const zip = new JSZip();
 
     const docMd = generateKotlinDocumentation(generated.mainActivity, config, generated);
@@ -248,8 +481,9 @@ const App: React.FC = () => {
 
   const handleQuickBuildApk = async () => {
     if (!generated) return;
+    incrementVersion();
     setIsBuildingApk(true);
-    addLog("⚡ [Cloud Build] Iniciando compilação do APK Rápido (Android Release)...", "info");
+    addLog("⚡ [Cloud Build] Iniciando compilação do APK Rápido (Android Release com versão atualizada)...", "info");
 
     // Push to GitHub CI/CD if credentials are preset
     if (config.githubUser && config.githubRepo && config.githubToken) {
@@ -377,7 +611,8 @@ const App: React.FC = () => {
 
   const speakMessage = async (text: string) => {
     try {
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+      const apiKeyToUse = config.apiKey || process.env.API_KEY || process.env.GEMINI_API_KEY || '';
+      const ai = new GoogleGenAI({ apiKey: apiKeyToUse });
       const response = await ai.models.generateContent({
         model: "gemini-2.5-flash-preview-tts",
         contents: [{ parts: [{ text: text }] }],
@@ -418,7 +653,8 @@ const App: React.FC = () => {
     setAttachments([]);
 
     try {
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+      const apiKeyToUse = config.apiKey || process.env.API_KEY || process.env.GEMINI_API_KEY || '';
+      const ai = new GoogleGenAI({ apiKey: apiKeyToUse });
       const parts: any[] = [{ text: currentPrompt }];
       
       const limitedAttachments = currentAttachments.slice(0, 10);
@@ -486,6 +722,128 @@ const App: React.FC = () => {
     }
   };
 
+  const handleExportHeavyStudioConfigJson = () => {
+    try {
+      exportHeavyStudioConfig({
+        config,
+        logs,
+        conversationHistory,
+        iconGallery,
+        attachments,
+        activeTab,
+        generated
+      });
+      addLog(`⚙️ Configuração heavy_studio_config.json exportada com sucesso (${config.appName})!`, "success");
+    } catch (err: any) {
+      addLog(`Erro ao exportar heavy_studio_config: ${err.message}`, "error");
+    }
+  };
+
+  const handleImportHeavyStudioConfigJson = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = async (event) => {
+      try {
+        const jsonText = event.target?.result as string;
+        const importedData = importHeavyStudioConfig(jsonText);
+
+        setConfig(importedData.config);
+        if (importedData.generated) setGenerated(importedData.generated);
+        if (importedData.logs && importedData.logs.length > 0) setLogs(importedData.logs);
+        if (importedData.conversationHistory && importedData.conversationHistory.length > 0) setConversationHistory(importedData.conversationHistory);
+        if (importedData.iconGallery) setIconGallery(importedData.iconGallery);
+        if (importedData.attachments) setAttachments(importedData.attachments);
+        if (importedData.activeTab) setActiveTab(importedData.activeTab);
+
+        await saveProjectToIndexedDB({
+          config: importedData.config,
+          logs: importedData.logs || [],
+          conversationHistory: importedData.conversationHistory || [],
+          iconGallery: importedData.iconGallery || [],
+          attachments: importedData.attachments || [],
+          activeTab: importedData.activeTab,
+          generated: importedData.generated || null
+        });
+
+        const timeStr = new Date().toLocaleTimeString();
+        setLastSavedTime(timeStr);
+        addLog(`📥 Projeto '${importedData.config.appName}' (heavy_studio_config) carregado com sucesso!`, "success");
+      } catch (err: any) {
+        addLog(err.message, "error");
+      } finally {
+        if (configFileInputRef.current) configFileInputRef.current.value = '';
+      }
+    };
+    reader.readAsText(file);
+  };
+
+  const [isExportingBrandingAssets, setIsExportingBrandingAssets] = useState<boolean>(false);
+
+  const handleExportBrandingAssets = async () => {
+    setIsExportingBrandingAssets(true);
+    try {
+      addLog("Gerando pacote de branding com ícones em resoluções (mdpi, hdpi, xhdpi, xxhdpi, xxxhdpi)...", "info");
+      await exportBrandingAssetsZip(config);
+      addLog("📦 Pacote ZIP de assets de branding baixado com sucesso!", "success");
+    } catch (err: any) {
+      addLog(`Erro ao exportar assets de branding: ${err.message}`, "error");
+    } finally {
+      setIsExportingBrandingAssets(false);
+    }
+  };
+
+  const handleCustomIconUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (!file.type.startsWith('image/')) {
+      addLog("Selecione um arquivo de imagem válido (PNG, JPG, WebP, etc.).", "error");
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      try {
+        const result = event.target?.result as string;
+        const base64Data = result.replace(/^data:image\/[a-zA-Z]+;base64,/, '');
+
+        const iconAsset: AppAsset = {
+          name: file.name || 'ic_launcher.png',
+          data: base64Data,
+          mimeType: file.type || 'image/png'
+        };
+
+        const newSavedIcon: SavedIcon = {
+          id: 'icon_' + Date.now(),
+          data: base64Data,
+          prompt: `Upload local: ${file.name}`,
+          timestamp: Date.now()
+        };
+
+        setIconGallery(prev => {
+          const filtered = prev.filter(item => item.data !== base64Data);
+          return [newSavedIcon, ...filtered].slice(0, 20);
+        });
+
+        setConfig(prev => ({
+          ...prev,
+          iconType: 'image',
+          uploadedIcon: iconAsset,
+          iconPrompt: `Upload: ${file.name}`
+        }));
+
+        addLog(`🖼️ Ícone customizado "${file.name}" enviado e aplicado com sucesso (uploadedIcon)!`, "success");
+      } catch (err: any) {
+        addLog(`Erro ao processar imagem do ícone: ${err.message}`, "error");
+      } finally {
+        if (iconFileInputRef.current) iconFileInputRef.current.value = '';
+      }
+    };
+    reader.readAsDataURL(file);
+  };
+
   const modelOptions = [
     { id: 'gemini-3-pro-preview', name: 'Gemini 3 Pro', description: 'Raciocínio Avançado' },
     { id: 'gemini-3-flash-preview', name: 'Gemini 3 Flash', description: 'Alta Velocidade' },
@@ -508,14 +866,30 @@ const App: React.FC = () => {
           </div>
           <div className="hidden sm:block">
             <h1 className="font-black text-lg tracking-tighter text-white uppercase italic">Heavy Studio <span className="text-blue-500">PRO</span></h1>
-            <p className="text-[8px] uppercase tracking-[0.3em] text-blue-400 font-bold">Build Studio v2.9</p>
+            <div className="flex items-center gap-2">
+              <p className="text-[8px] uppercase tracking-[0.3em] text-blue-400 font-bold">Build Studio v2.9</p>
+              <span className="text-slate-600 text-[8px]">|</span>
+              <div className="flex items-center gap-1.5 text-[8.5px] font-mono">
+                <span className={`w-2 h-2 rounded-full ${isOnline ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400 animate-ping'}`} />
+                <span className={isOnline ? 'text-emerald-400 font-bold' : 'text-amber-400 font-bold'}>
+                  {isOnline ? 'Online' : 'Offline'}
+                </span>
+                <span className="text-slate-600">·</span>
+                <span className="text-slate-400 flex items-center gap-1" title="Estado e logs mantidos em IndexedDB local">
+                  <span>💾 IDB</span>
+                  {lastSavedTime && <span className="text-slate-500">({lastSavedTime})</span>}
+                </span>
+              </div>
+            </div>
           </div>
         </div>
         
         <nav className="flex bg-black/40 p-1 rounded-xl border border-white/5 mx-2 gap-1 overflow-x-auto">
           {[
             { id: TabType.PREVIEW, label: 'Preview' },
+            { id: TabType.COMPONENT_LIBRARY, label: '🧩 Componentes UI' },
             { id: config.platform === 'android' ? TabType.KOTLIN : TabType.SWIFT, label: config.platform === 'android' ? 'Kotlin' : 'Swift' },
+            { id: TabType.PLAY_CONSOLE, label: '🎯 Play Console' },
             { id: TabType.AAB_EXPLORER, label: '📦 Explorador AAB' },
             { id: TabType.MANIFEST_VALIDATOR, label: '🛡️ Audit Manifest' },
             { id: TabType.README_GENERATOR, label: '📝 README.md' },
@@ -535,6 +909,16 @@ const App: React.FC = () => {
         </nav>
 
         <div className="flex items-center gap-2">
+           <button 
+             onClick={handleResetNewApp} 
+             className="bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white px-3 py-2 rounded-xl text-[9px] sm:text-[10px] font-black uppercase tracking-tighter shadow-lg transition-all active:scale-95 flex items-center gap-1.5 border border-cyan-400/40 shrink-0"
+             title="Limpar a tela e criar um novo projeto/app do zero"
+           >
+             <span>✨</span>
+             <span className="hidden xs:inline">Novo App</span>
+             <span className="xs:hidden">Novo</span>
+           </button>
+
            <button 
              onClick={handleGitHubSync} 
              disabled={isSyncing || !generated} 
@@ -586,12 +970,33 @@ const App: React.FC = () => {
            </button>
 
            <button 
+             onClick={() => setShowDownloadsModal(true)} 
+             disabled={!generated} 
+             className="bg-amber-600 hover:bg-amber-500 text-white px-3 sm:px-4 py-2 rounded-xl text-[9px] sm:text-[10px] font-black uppercase tracking-tighter shadow-lg transition-all active:scale-95 flex items-center gap-1.5 border border-amber-400/30 shadow-amber-900/30"
+             title="Abrir Central e Pasta de Downloads do Projeto"
+           >
+             <span>📁</span>
+             <span className="hidden md:inline">Central Downloads</span>
+             <span className="md:hidden">Downloads</span>
+           </button>
+
+           <button 
              onClick={handleDownloadProject} 
              disabled={!generated} 
              className="bg-green-600 hover:bg-green-500 text-white px-3 sm:px-4 py-2 rounded-xl text-[9px] sm:text-[10px] font-black uppercase tracking-tighter shadow-lg transition-all active:scale-95 flex items-center gap-1"
-             title="Download Código Fonte ZIP"
+             title="Download Código Fonte ZIP (inclui pasta /download)"
            >
              ZIP
+           </button>
+
+           <button 
+             onClick={handleExportHeavyStudioConfigJson} 
+             className="bg-purple-900/80 hover:bg-purple-800 text-purple-200 border border-purple-500/40 px-2.5 sm:px-3 py-2 rounded-xl text-[9px] sm:text-[10px] font-black uppercase tracking-tighter shadow-lg transition-all active:scale-95 flex items-center gap-1.5"
+             title="Exportar arquivo de configuração e build (heavy_studio_config.json)"
+           >
+             <span>⚙️</span>
+             <span className="hidden lg:inline">Config JSON</span>
+             <span className="lg:hidden">JSON</span>
            </button>
         </div>
       </header>
@@ -602,7 +1007,98 @@ const App: React.FC = () => {
           bg-[#0f172a]/50 backdrop-blur-md border-r border-white/5 p-6 flex flex-col gap-6 overflow-y-auto scrollbar-hide
           transition-all duration-300 ease-in-out z-40 h-full
         `}>
-          <section className="space-y-6">
+          <section className="space-y-4">
+            <button
+              onClick={handleResetNewApp}
+              className="w-full py-2.5 px-3 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white rounded-xl font-black text-[10px] uppercase tracking-wider flex items-center justify-center gap-2 shadow-lg border border-cyan-400/30 transition-all active:scale-95"
+              title="Limpar toda a tela e começar a criar um novo aplicativo"
+            >
+              <span>✨</span>
+              <span>Criar Novo App (Limpar Tela)</span>
+            </button>
+
+            {/* IndexedDB Offline Cache Card */}
+            <div className="bg-slate-900/90 p-3 rounded-2xl border border-blue-500/30 space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-[9.5px] font-black uppercase text-slate-200 tracking-wider flex items-center gap-1.5">
+                  <span>💾</span> IndexedDB Cache
+                </span>
+                <span className={`w-2 h-2 rounded-full ${isOnline ? 'bg-emerald-400' : 'bg-amber-400 animate-ping'}`} />
+              </div>
+              <p className="text-[8.5px] text-slate-400 leading-tight">
+                Estado do projeto e histórico de logs salvos automaticamente no armazenamento local assíncrono.
+              </p>
+              <div className="flex items-center justify-between text-[8px] font-mono text-slate-400 bg-black/40 p-1.5 rounded-lg border border-white/5">
+                <span>Último Salvamento:</span>
+                <span className="text-emerald-400 font-bold">{lastSavedTime || 'Salvando...'}</span>
+              </div>
+              <div className="flex items-center gap-1.5 pt-1">
+                <button
+                  onClick={async () => {
+                    await saveProjectToIndexedDB({ config, logs, conversationHistory, iconGallery, attachments, activeTab, generated });
+                    const nowStr = new Date().toLocaleTimeString();
+                    setLastSavedTime(nowStr);
+                    addLog(`💾 Projeto e logs salvos manualmente no IndexedDB às ${nowStr}!`, "success");
+                  }}
+                  className="flex-1 py-1.5 px-2 bg-blue-600/30 hover:bg-blue-600/50 text-blue-300 border border-blue-500/40 rounded-lg text-[8px] font-bold uppercase tracking-wider transition-colors"
+                >
+                  Salvar Agora
+                </button>
+                <button
+                  onClick={async () => {
+                    if (window.confirm("Deseja apagar o cache salvo no IndexedDB?")) {
+                      await clearProjectIndexedDBCache();
+                      setLastSavedTime(null);
+                      addLog("🧹 Cache IndexedDB limpo com sucesso.", "warning");
+                    }
+                  }}
+                  className="py-1.5 px-2 bg-rose-950/40 hover:bg-rose-900/60 text-rose-300 border border-rose-500/30 rounded-lg text-[8px] font-bold uppercase tracking-wider transition-colors"
+                >
+                  Limpar Cache
+                </button>
+              </div>
+            </div>
+
+            {/* heavy_studio_config JSON Export / Import Card */}
+            <div className="bg-slate-900/90 p-3 rounded-2xl border border-purple-500/30 space-y-2 shadow-xl">
+              <div className="flex items-center justify-between">
+                <span className="text-[9.5px] font-black uppercase text-slate-200 tracking-wider flex items-center gap-1.5">
+                  <span>⚙️</span> heavy_studio_config
+                </span>
+                <span className="text-[8px] bg-purple-500/20 text-purple-300 font-mono font-bold px-1.5 py-0.5 rounded border border-purple-500/30">
+                  JSON v2.9
+                </span>
+              </div>
+              <p className="text-[8.5px] text-slate-400 leading-tight">
+                Salve ou carregue as configurações e o estado completo de builds localmente.
+              </p>
+              <div className="grid grid-cols-2 gap-1.5 pt-1">
+                <button
+                  onClick={handleExportHeavyStudioConfigJson}
+                  className="py-1.5 px-2 bg-purple-600/30 hover:bg-purple-600/50 text-purple-200 border border-purple-500/40 rounded-lg text-[8px] font-bold uppercase tracking-wider transition-colors flex items-center justify-center gap-1"
+                  title="Salvar heavy_studio_config.json no computador"
+                >
+                  <span>📤</span> Exportar
+                </button>
+
+                <button
+                  onClick={() => configFileInputRef.current?.click()}
+                  className="py-1.5 px-2 bg-indigo-600/30 hover:bg-indigo-600/50 text-indigo-200 border border-indigo-500/40 rounded-lg text-[8px] font-bold uppercase tracking-wider transition-colors flex items-center justify-center gap-1"
+                  title="Carregar projeto a partir de um heavy_studio_config.json"
+                >
+                  <span>📥</span> Importar
+                </button>
+
+                <input
+                  type="file"
+                  ref={configFileInputRef}
+                  onChange={handleImportHeavyStudioConfigJson}
+                  accept=".json"
+                  className="hidden"
+                />
+              </div>
+            </div>
+
             <h3 className="text-[10px] font-black text-slate-500 uppercase tracking-widest border-l-2 border-blue-600 pl-3">Platform Core</h3>
             <div className="flex bg-black/40 p-1 rounded-xl border border-white/5">
               <button onClick={() => setConfig({...config, platform: 'android'})} className={`flex-1 flex flex-col items-center gap-1 py-3 rounded-lg transition-all ${config.platform === 'android' ? 'bg-blue-600 text-white shadow-lg' : 'text-slate-500 hover:text-slate-300'}`}>
@@ -631,12 +1127,43 @@ const App: React.FC = () => {
                 <label className="text-[9px] text-slate-500 mb-1 block font-bold uppercase">Personal Access Token (PAT)</label>
                 <input type="password" value={config.githubToken} onChange={e => setConfig({...config, githubToken: e.target.value})} className="w-full bg-black/20 p-2 rounded-xl border border-white/5 text-[11px] outline-none focus:border-blue-500" placeholder="ghp_xxxxxxxxxxxx" />
               </div>
+
+              {/* Galeria de Templates Workflow YAML */}
+              <div className="pt-3 border-t border-white/5">
+                <WorkflowGallerySection
+                  config={config}
+                  generated={generated}
+                  setGenerated={setGenerated}
+                  addLog={addLog}
+                />
+              </div>
             </div>
           </section>
 
           <section className="space-y-6 border-t border-white/5 pt-6">
-            <h3 className="text-[10px] font-black text-slate-500 uppercase tracking-widest border-l-2 border-purple-600 pl-3">Neural AI</h3>
+            <h3 className="text-[10px] font-black text-slate-500 uppercase tracking-widest border-l-2 border-purple-600 pl-3">Neural AI & Keys</h3>
             <div className="space-y-4">
+              <div>
+                <label className="text-[9px] text-slate-500 mb-1 block font-bold uppercase">Chave de API Gemini (API Key)</label>
+                <input 
+                  type="password" 
+                  value={config.apiKey || ''} 
+                  onChange={e => setConfig({...config, apiKey: e.target.value})} 
+                  className="w-full bg-black/20 p-2 rounded-xl border border-white/5 text-[11px] outline-none focus:border-purple-500 font-mono text-slate-200" 
+                  placeholder="AIzaSy..." 
+                />
+                <span className="text-[8px] text-slate-500 mt-0.5 block">Opcional: insira sua chave do Google AI Studio</span>
+              </div>
+              <div>
+                <label className="text-[9px] text-slate-500 mb-1 block font-bold uppercase">Google Cloud Project ID</label>
+                <input 
+                  type="text" 
+                  value={config.googleProjectId || ''} 
+                  onChange={e => setConfig({...config, googleProjectId: e.target.value})} 
+                  className="w-full bg-black/20 p-2 rounded-xl border border-white/5 text-[11px] outline-none focus:border-purple-500 text-slate-200" 
+                  placeholder="ex: meu-projeto-1234" 
+                />
+              </div>
               <div>
                 <label className="text-[9px] text-slate-500 mb-2 block font-bold uppercase tracking-widest">Modelo Gemini</label>
                 <div className="grid grid-cols-1 gap-2">
@@ -659,9 +1186,59 @@ const App: React.FC = () => {
                    <div className={`w-3 h-3 bg-white rounded-full absolute top-0.5 transition-all ${config.useSearch ? 'right-0.5' : 'left-0.5'}`} />
                  </div>
               </div>
-              <div>
-                <label className="text-[9px] text-slate-500 mb-1 block font-bold uppercase">Nome do App</label>
-                <input type="text" value={config.appName} onChange={e => setConfig({...config, appName: e.target.value})} className="w-full bg-black/20 p-2 rounded-xl border border-white/5 text-[11px] outline-none focus:border-blue-500" />
+              {/* Nome do App e Preview do Ícone em Destaque */}
+              <div className="space-y-2 bg-black/30 p-3 rounded-2xl border border-white/5">
+                <div className="flex items-center justify-between">
+                  <label className="text-[9px] text-slate-400 block font-bold uppercase">Nome do App & Branding</label>
+                  <span className="text-[8px] bg-emerald-500/20 text-emerald-300 px-2 py-0.5 rounded-full border border-emerald-500/30 font-mono font-bold">
+                    v{config.versionName || '1.0.0'} (build {config.versionCode || 1})
+                  </span>
+                </div>
+
+                <div className="flex items-center gap-2.5">
+                  {/* Ícone Preview Ativo */}
+                  <div className="relative group shrink-0">
+                    <div className="w-12 h-12 rounded-2xl bg-slate-900 border border-white/20 p-1 flex items-center justify-center overflow-hidden shadow-lg bg-gradient-to-br from-slate-800 to-slate-950">
+                      {config.uploadedIcon?.data ? (
+                        <img
+                          src={`data:image/png;base64,${config.uploadedIcon.data}`}
+                          alt="App Icon Preview"
+                          className="w-full h-full object-cover rounded-xl"
+                        />
+                      ) : (
+                        <div
+                          className="w-full h-full rounded-xl flex items-center justify-center text-white font-black text-xs shadow-inner"
+                          style={{ backgroundColor: config.iconColor || '#2563eb', color: config.iconTextColor || '#FFFFFF' }}
+                        >
+                          {config.iconLabel || 'HS'}
+                        </div>
+                      )}
+                    </div>
+                    <span className="absolute -bottom-1 -right-1 flex h-3 w-3">
+                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                      <span className="relative inline-flex rounded-full h-3 w-3 bg-emerald-500 border border-slate-900"></span>
+                    </span>
+                  </div>
+
+                  <div className="flex-1 space-y-1">
+                    <input
+                      type="text"
+                      value={config.appName}
+                      onChange={e => setConfig({...config, appName: e.target.value})}
+                      className="w-full bg-black/40 p-2 rounded-xl border border-white/10 text-[11px] font-bold text-white outline-none focus:border-blue-500"
+                      placeholder="Nome do seu app"
+                    />
+                    <div className="flex items-center justify-between text-[8px] text-slate-400 font-mono">
+                      <span>ic_launcher (512x512)</span>
+                      <button
+                        onClick={() => handleGenerateIcon()}
+                        className="text-amber-400 hover:underline flex items-center gap-0.5 font-bold"
+                      >
+                        ⚡ Gerar IA
+                      </button>
+                    </div>
+                  </div>
+                </div>
               </div>
               <div>
                 <label className="text-[9px] text-slate-500 mb-1 block font-bold uppercase">Descrição do App (Contexto IA)</label>
@@ -676,8 +1253,16 @@ const App: React.FC = () => {
             </div>
           </section>
 
-          <section className="space-y-4 border-t border-white/5 pt-6">
-            <h3 className="text-[10px] font-black text-slate-500 uppercase tracking-widest border-l-2 border-amber-500 pl-3">App Icon & Branding</h3>
+          <section id="App-Icon-Section-Container" className="space-y-4 border-t border-white/5 pt-6">
+            <div className="flex items-center justify-between">
+              <h3 className="text-[10px] font-black text-slate-500 uppercase tracking-widest border-l-2 border-amber-500 pl-3">App Icon & Branding</h3>
+              {iconGallery.length > 0 && (
+                <span className="text-[9px] font-bold text-amber-400 bg-amber-500/10 px-2 py-0.5 rounded-full border border-amber-500/20">
+                  {iconGallery.length} salvo{iconGallery.length > 1 ? 's' : ''}
+                </span>
+              )}
+            </div>
+
             <div className="space-y-3">
               <div>
                 <label className="text-[9px] text-slate-500 mb-1 block font-bold uppercase">Estilo de Branding / Prompt do Ícone</label>
@@ -690,39 +1275,159 @@ const App: React.FC = () => {
                 />
               </div>
 
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  onClick={() => handleGenerateIcon()}
+                  disabled={isGeneratingIcon}
+                  className={`py-2.5 px-3 rounded-xl text-[10px] font-black uppercase tracking-wider flex items-center justify-center gap-1.5 shadow-lg transition-all active:scale-95 ${
+                    isGeneratingIcon
+                      ? 'bg-amber-600/50 text-amber-200 animate-pulse cursor-not-allowed'
+                      : 'bg-amber-600 hover:bg-amber-500 text-white'
+                  }`}
+                >
+                  <Icons.Sparkles />
+                  <span className="truncate">{isGeneratingIcon ? 'Gerando...' : 'Gerar com IA'}</span>
+                </button>
+
+                <button
+                  id="btn-upload-custom-icon"
+                  onClick={() => iconFileInputRef.current?.click()}
+                  disabled={isGeneratingIcon}
+                  className="py-2.5 px-3 rounded-xl text-[10px] font-black uppercase tracking-wider flex items-center justify-center gap-1.5 bg-indigo-600 hover:bg-indigo-500 text-white shadow-lg transition-all active:scale-95"
+                  title="Fazer upload de uma imagem do computador para ser o ícone do aplicativo"
+                >
+                  <span>🖼️</span>
+                  <span className="truncate">Upload de Ícone</span>
+                </button>
+              </div>
+
+              <input
+                type="file"
+                ref={iconFileInputRef}
+                onChange={handleCustomIconUpload}
+                accept="image/*"
+                className="hidden"
+              />
+
+              {/* Action Button: Export Branding Assets */}
               <button
-                onClick={() => handleGenerateIcon()}
-                disabled={isGeneratingIcon}
-                className={`w-full py-2.5 px-3 rounded-xl text-[10px] font-black uppercase tracking-wider flex items-center justify-center gap-2 shadow-lg transition-all active:scale-95 ${
-                  isGeneratingIcon
-                    ? 'bg-amber-600/50 text-amber-200 animate-pulse cursor-not-allowed'
-                    : 'bg-amber-600 hover:bg-amber-500 text-white'
+                id="btn-export-branding-assets"
+                onClick={handleExportBrandingAssets}
+                disabled={isExportingBrandingAssets}
+                className={`w-full py-2.5 px-3 rounded-xl text-[10px] font-black uppercase tracking-wider flex items-center justify-center gap-2 shadow-lg transition-all active:scale-95 border border-amber-500/40 ${
+                  isExportingBrandingAssets
+                    ? 'bg-amber-900/50 text-amber-300 animate-pulse cursor-not-allowed'
+                    : 'bg-gradient-to-r from-amber-950 via-slate-900 to-amber-950 hover:from-amber-900 hover:to-slate-800 text-amber-300 hover:text-white'
                 }`}
+                title="Exportar ZIP com ícone redimensionado em resoluções Android (mdpi, hdpi, xhdpi, xxhdpi, xxxhdpi) e Play Store"
               >
-                <Icons.Sparkles />
-                <span>{isGeneratingIcon ? 'Gerando ic_launcher...' : 'Gerar ic_launcher (IA)'}</span>
+                <span>📦</span>
+                <span>{isExportingBrandingAssets ? 'Gerando Assets...' : 'Exportar Assets de Branding'}</span>
               </button>
 
-              {config.iconType === 'image' && config.uploadedIcon && (
-                <div className="p-3 bg-amber-500/10 border border-amber-500/20 rounded-xl flex items-center justify-between">
-                  <div className="flex items-center gap-3 overflow-hidden">
-                    <img
-                      src={`data:image/png;base64,${config.uploadedIcon.data}`}
-                      alt="ic_launcher"
-                      className="w-10 h-10 rounded-lg shadow border border-white/20 object-cover shrink-0"
-                    />
-                    <div className="truncate">
-                      <p className="text-[10px] font-bold text-amber-400 truncate">ic_launcher.png</p>
-                      <p className="text-[8px] text-slate-400 uppercase">Gerado por IA (Base64)</p>
-                    </div>
+              {/* Real-Time Generation Progress Preview */}
+              {isGeneratingIcon && (
+                <div className="p-4 bg-gradient-to-r from-amber-500/10 via-purple-500/10 to-blue-500/10 border border-amber-500/30 rounded-2xl flex flex-col items-center justify-center gap-2 text-center animate-pulse shadow-inner">
+                  <div className="relative flex items-center justify-center">
+                    <div className="w-14 h-14 rounded-2xl bg-amber-500/20 border-2 border-dashed border-amber-400 animate-spin" />
+                    <div className="absolute text-amber-300 font-black text-xs">AI</div>
                   </div>
-                  <button
-                    onClick={() => setConfig({...config, iconType: 'text', uploadedIcon: null})}
-                    className="text-[9px] text-slate-400 hover:text-red-400 font-bold uppercase p-1 shrink-0 ml-2"
-                    title="Restaurar ícone textual"
-                  >
-                    Reset
-                  </button>
+                  <div>
+                    <p className="text-[10px] font-black text-amber-300 uppercase tracking-wider">Gerando Ícone em Tempo Real</p>
+                    <p className="text-[8px] text-slate-400 mt-0.5">Sintetizando arte Base64 para Android e iOS...</p>
+                  </div>
+                </div>
+              )}
+
+              {/* Active Icon Live Preview Card */}
+              {!isGeneratingIcon && config.iconType === 'image' && config.uploadedIcon && (
+                <div className="p-3 bg-slate-900/80 border border-amber-500/30 rounded-2xl shadow-xl flex flex-col gap-2">
+                  <div className="text-[8px] font-bold text-slate-400 uppercase tracking-widest flex items-center justify-between">
+                    <span>Pré-visualização do Ícone</span>
+                    <span className="text-amber-400 font-mono">512 x 512 px</span>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <div className="relative group shrink-0">
+                      <img
+                        src={`data:image/png;base64,${config.uploadedIcon.data}`}
+                        alt="ic_launcher preview"
+                        className="w-14 h-14 rounded-2xl shadow-md border-2 border-amber-500/50 object-cover bg-black"
+                      />
+                      <div className="absolute -bottom-1 -right-1 bg-emerald-500 w-4 h-4 rounded-full border-2 border-slate-900 flex items-center justify-center text-[8px] text-black font-black" title="Ativo no App">
+                        ✓
+                      </div>
+                    </div>
+                    <div className="truncate flex-1">
+                      <p className="text-[11px] font-black text-amber-300 truncate">ic_launcher.png</p>
+                      <p className="text-[8px] text-slate-400 italic truncate">
+                        {config.iconPrompt ? `"${config.iconPrompt}"` : 'Gerado com IA'}
+                      </p>
+                      <p className="text-[8px] text-emerald-400 font-mono mt-0.5">MIME: image/png (Base64)</p>
+                    </div>
+                    <button
+                      onClick={() => setConfig({...config, iconType: 'text', uploadedIcon: null})}
+                      className="text-[9px] text-slate-400 hover:text-red-400 font-bold uppercase p-1.5 hover:bg-white/5 rounded-lg transition-colors shrink-0"
+                      title="Restaurar ícone textual"
+                    >
+                      Reset
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Local Storage Icon Gallery */}
+              {iconGallery.length > 0 && (
+                <div className="space-y-2 pt-2 border-t border-white/5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest">
+                      Galeria de Ícones Salvos ({iconGallery.length})
+                    </span>
+                    <button
+                      onClick={() => {
+                        if (confirm('Deseja limpar todos os ícones salvos na galeria local?')) {
+                          setIconGallery([]);
+                        }
+                      }}
+                      className="text-[8px] text-slate-500 hover:text-red-400 uppercase font-bold transition-colors"
+                    >
+                      Limpar
+                    </button>
+                  </div>
+                  <div className="grid grid-cols-4 gap-2 max-h-40 overflow-y-auto p-1.5 bg-black/30 rounded-xl border border-white/5 scrollbar-hide">
+                    {iconGallery.map((item) => {
+                      const isActive = config.uploadedIcon?.data === item.data;
+                      return (
+                        <div
+                          key={item.id}
+                          onClick={() => handleSelectGalleryIcon(item)}
+                          className={`relative group cursor-pointer rounded-xl overflow-hidden border-2 transition-all aspect-square bg-slate-950 flex items-center justify-center ${
+                            isActive
+                              ? 'border-amber-400 ring-2 ring-amber-400/40 shadow-lg scale-95'
+                              : 'border-white/10 hover:border-amber-400/60 hover:scale-105'
+                          }`}
+                          title={item.prompt ? `Ativar: "${item.prompt}"` : 'Selecionar este ícone'}
+                        >
+                          <img
+                            src={`data:image/png;base64,${item.data}`}
+                            alt="Saved Icon"
+                            className="w-full h-full object-cover"
+                          />
+                          {isActive && (
+                            <div className="absolute top-1 right-1 bg-amber-500 text-slate-950 w-3.5 h-3.5 rounded-full flex items-center justify-center text-[8px] font-black shadow">
+                              ✓
+                            </div>
+                          )}
+                          <button
+                            onClick={(e) => handleDeleteGalleryIcon(item.id, e)}
+                            className="absolute top-0.5 left-0.5 bg-black/80 hover:bg-red-600 text-white w-4 h-4 rounded-full flex items-center justify-center text-[9px] opacity-0 group-hover:opacity-100 transition-opacity"
+                            title="Excluir da galeria"
+                          >
+                            ✕
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
                 </div>
               )}
             </div>
@@ -756,6 +1461,26 @@ const App: React.FC = () => {
                 fileInputRef={fileInputRef}
               />
              )
+          ) : activeTab === TabType.COMPONENT_LIBRARY ? (
+            <div className="h-full w-full overflow-y-auto p-2 sm:p-4">
+              <PrefabComponentLibrary
+                config={config}
+                setConfig={setConfig}
+                generated={generated}
+                setGenerated={setGenerated}
+                addLog={addLog}
+              />
+            </div>
+          ) : activeTab === TabType.PLAY_CONSOLE ? (
+            <div className="h-full w-full overflow-y-auto p-2 sm:p-4">
+              <GooglePlayPublisherManager
+                config={config}
+                setConfig={setConfig}
+                generated={generated}
+                setGenerated={setGenerated}
+                addLog={addLog}
+              />
+            </div>
           ) : activeTab === TabType.AAB_EXPLORER ? (
             <div className="h-full w-full overflow-y-auto p-2 sm:p-4">
               <AabExplorer
@@ -893,6 +1618,213 @@ const App: React.FC = () => {
                 <span>✓</span> Mapeamento de Classes, Métodos e Dependências Concluído
               </span>
               <span>Incluso automaticamente nos exports ZIP, AAB e GitHub Push</span>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal Pasta e Central de Downloads */}
+      {showDownloadsModal && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-3 sm:p-6 animate-fade-in">
+          <div className="bg-[#0f172a] border border-amber-500/40 rounded-2xl w-full max-w-3xl max-h-[90vh] flex flex-col shadow-2xl overflow-hidden">
+            {/* Header */}
+            <div className="px-5 py-4 bg-slate-900 border-b border-white/10 flex items-center justify-between shrink-0">
+              <div className="flex items-center gap-3">
+                <span className="p-2.5 bg-amber-500/20 text-amber-400 rounded-xl text-xl">📁</span>
+                <div>
+                  <h3 className="text-sm font-black text-white font-sans flex items-center gap-2">
+                    Pasta & Central de Downloads do Projeto
+                  </h3>
+                  <p className="text-[10px] text-amber-300/80 font-sans">
+                    {config.appName} ({config.platform.toUpperCase()}) — Arquivos compilados e fontes disponíveis para download imediato
+                  </p>
+                </div>
+              </div>
+
+              <button
+                onClick={() => setShowDownloadsModal(false)}
+                className="p-2 bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white rounded-xl transition-all"
+                title="Fechar"
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* Content Body */}
+            <div className="flex-1 overflow-y-auto p-5 bg-slate-950 space-y-4 font-sans text-slate-200 scrollbar-thin">
+              {/* Box Principal de Download do ZIP */}
+              <div className="p-4 bg-gradient-to-r from-amber-500/10 via-emerald-500/10 to-blue-500/10 border border-amber-500/30 rounded-2xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-black text-amber-400 uppercase tracking-wider">📦 Pacote ZIP Completo</span>
+                    <span className="text-[9px] bg-emerald-500/20 text-emerald-300 font-mono px-2 py-0.5 rounded-full border border-emerald-500/30">Inclusa Pasta /download</span>
+                  </div>
+                  <p className="text-[11px] text-slate-300">
+                    Contém o código completo do projeto e uma pasta dedicada <code className="text-amber-300 font-mono bg-black/40 px-1.5 py-0.5 rounded">/download</code> com todos os artefatos avulsos.
+                  </p>
+                </div>
+                <button
+                  onClick={handleDownloadProject}
+                  disabled={!generated}
+                  className="px-4 py-2.5 bg-amber-500 hover:bg-amber-400 text-slate-950 font-black rounded-xl text-[11px] uppercase tracking-wider shadow-lg transition-all active:scale-95 shrink-0 flex items-center gap-2"
+                >
+                  <span>📥 Baixar Projeto .ZIP</span>
+                </button>
+              </div>
+
+              <div className="border-t border-white/5 pt-3">
+                <h4 className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-3 flex items-center gap-2">
+                  <span>📄</span> Arquivos Avulsos para Download Direto
+                </h4>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  {/* Item: Documentacao Kotlin */}
+                  <div className="p-3 bg-slate-900/80 border border-white/10 rounded-xl flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-2.5 overflow-hidden">
+                      <span className="text-lg">📘</span>
+                      <div className="truncate">
+                        <p className="text-[11px] font-bold text-sky-300 truncate">DOCUMENTATION.md</p>
+                        <p className="text-[9px] text-slate-400">Análise sintática & Docs</p>
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => {
+                        if (generated) {
+                          const doc = generateKotlinDocumentation(generated.mainActivity, config, generated);
+                          handleDownloadSingleFile(`DOCUMENTATION_${config.appName.replace(/\s+/g, '_')}.md`, doc, 'text/markdown;charset=utf-8');
+                        }
+                      }}
+                      disabled={!generated}
+                      className="px-2.5 py-1.5 bg-sky-600/30 hover:bg-sky-600 text-sky-200 hover:text-white border border-sky-500/40 rounded-lg text-[9px] font-bold uppercase transition-all shrink-0"
+                    >
+                      Baixar .MD
+                    </button>
+                  </div>
+
+                  {/* Item: AndroidManifest.xml */}
+                  <div className="p-3 bg-slate-900/80 border border-white/10 rounded-xl flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-2.5 overflow-hidden">
+                      <span className="text-lg">🛡️</span>
+                      <div className="truncate">
+                        <p className="text-[11px] font-bold text-amber-300 truncate">AndroidManifest.xml</p>
+                        <p className="text-[9px] text-slate-400">Permissões & Componentes</p>
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => {
+                        if (generated?.manifest) {
+                          handleDownloadSingleFile('AndroidManifest.xml', generated.manifest, 'text/xml;charset=utf-8');
+                        }
+                      }}
+                      disabled={!generated?.manifest}
+                      className="px-2.5 py-1.5 bg-amber-600/30 hover:bg-amber-600 text-amber-200 hover:text-white border border-amber-500/40 rounded-lg text-[9px] font-bold uppercase transition-all shrink-0"
+                    >
+                      Baixar .XML
+                    </button>
+                  </div>
+
+                  {/* Item: MainActivity.kt */}
+                  <div className="p-3 bg-slate-900/80 border border-white/10 rounded-xl flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-2.5 overflow-hidden">
+                      <span className="text-lg">☕</span>
+                      <div className="truncate">
+                        <p className="text-[11px] font-bold text-purple-300 truncate">MainActivity.kt</p>
+                        <p className="text-[9px] text-slate-400">Código Fonte Android</p>
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => {
+                        if (generated?.mainActivity) {
+                          handleDownloadSingleFile('MainActivity.kt', generated.mainActivity, 'text/plain;charset=utf-8');
+                        }
+                      }}
+                      disabled={!generated?.mainActivity}
+                      className="px-2.5 py-1.5 bg-purple-600/30 hover:bg-purple-600 text-purple-200 hover:text-white border border-purple-500/40 rounded-lg text-[9px] font-bold uppercase transition-all shrink-0"
+                    >
+                      Baixar .KT
+                    </button>
+                  </div>
+
+                  {/* Item: build.gradle */}
+                  <div className="p-3 bg-slate-900/80 border border-white/10 rounded-xl flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-2.5 overflow-hidden">
+                      <span className="text-lg">🐘</span>
+                      <div className="truncate">
+                        <p className="text-[11px] font-bold text-emerald-300 truncate">app/build.gradle</p>
+                        <p className="text-[9px] text-slate-400">Script de Compilação</p>
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => {
+                        if (generated?.buildGradleApp) {
+                          handleDownloadSingleFile('build.gradle', generated.buildGradleApp, 'text/plain;charset=utf-8');
+                        }
+                      }}
+                      disabled={!generated?.buildGradleApp}
+                      className="px-2.5 py-1.5 bg-emerald-600/30 hover:bg-emerald-600 text-emerald-200 hover:text-white border border-emerald-500/40 rounded-lg text-[9px] font-bold uppercase transition-all shrink-0"
+                    >
+                      Baixar .GRADLE
+                    </button>
+                  </div>
+
+                  {/* Item: AAB Bundle */}
+                  <div className="p-3 bg-slate-900/80 border border-white/10 rounded-xl flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-2.5 overflow-hidden">
+                      <span className="text-lg">📦</span>
+                      <div className="truncate">
+                        <p className="text-[11px] font-bold text-purple-300 truncate">Android App Bundle (.aab)</p>
+                        <p className="text-[9px] text-slate-400">Google Play Package</p>
+                      </div>
+                    </div>
+                    <button
+                      onClick={handleDownloadAab}
+                      disabled={!generated}
+                      className="px-2.5 py-1.5 bg-purple-600/30 hover:bg-purple-600 text-purple-200 hover:text-white border border-purple-500/40 rounded-lg text-[9px] font-bold uppercase transition-all shrink-0"
+                    >
+                      Baixar .AAB
+                    </button>
+                  </div>
+
+                  {/* Item: App Icon PNG */}
+                  <div className="p-3 bg-slate-900/80 border border-white/10 rounded-xl flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-2.5 overflow-hidden">
+                      {config.uploadedIcon?.data ? (
+                        <img src={`data:image/png;base64,${config.uploadedIcon.data}`} alt="icon" className="w-6 h-6 rounded-md object-cover" />
+                      ) : (
+                        <span className="text-lg">🎨</span>
+                      )}
+                      <div className="truncate">
+                        <p className="text-[11px] font-bold text-amber-300 truncate">ic_launcher.png</p>
+                        <p className="text-[9px] text-slate-400">Ícone HD 512x512</p>
+                      </div>
+                    </div>
+                    <button
+                      onClick={handleDownloadIconPng}
+                      disabled={!config.uploadedIcon?.data}
+                      className={`px-2.5 py-1.5 border rounded-lg text-[9px] font-bold uppercase transition-all shrink-0 ${
+                        config.uploadedIcon?.data 
+                          ? 'bg-amber-600/30 hover:bg-amber-600 text-amber-200 hover:text-white border-amber-500/40' 
+                          : 'bg-slate-800 text-slate-500 border-white/5 cursor-not-allowed'
+                      }`}
+                    >
+                      {config.uploadedIcon?.data ? 'Baixar .PNG' : 'Sem Ícone'}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Footer */}
+            <div className="px-5 py-3 bg-slate-900 border-t border-white/10 flex items-center justify-between text-[10px] text-slate-400 font-sans">
+              <span className="flex items-center gap-1.5 text-emerald-400 font-bold">
+                <span>✓</span> Central e Pasta de Downloads Ativa
+              </span>
+              <button
+                onClick={() => setShowDownloadsModal(false)}
+                className="px-3 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-[10px] font-bold uppercase"
+              >
+                Fechar
+              </button>
             </div>
           </div>
         </div>

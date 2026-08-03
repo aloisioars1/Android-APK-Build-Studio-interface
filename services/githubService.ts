@@ -158,74 +158,155 @@ export const GitHubService = {
       }
     }));
 
-    // 4. Criar a Tree (Se não houver lastCommitSha, cria tree raiz sem base_tree)
-    onLog("🌳 Gerando árvore de diretórios remota...");
-    const treeBody: any = { tree: treeItems };
-    if (lastCommitSha) {
-      treeBody.base_tree = lastCommitSha;
-    }
+    // 4. Criar a Tree com tratamento e Fallback automático via Contents API se o PAT não tiver escopo de Trees
+    try {
+      onLog("🌳 Gerando árvore de diretórios remota...");
+      const treeBody: any = { tree: treeItems };
+      if (lastCommitSha) {
+        treeBody.base_tree = lastCommitSha;
+      }
 
-    const treeResp = await fetch(`https://api.github.com/repos/${githubUser}/${githubRepo}/git/trees`, {
-      method: 'POST',
-      headers: { Authorization: `token ${githubToken}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify(treeBody)
-    });
-    const treeData = await treeResp.json();
-    if (!treeData.sha) throw new Error("Falha ao criar árvore Git no GitHub.");
-
-    // 5. Criar o Commit
-    onLog("💾 Consolidando alterações (Atomic Commit)...");
-    const commitBody: any = {
-      message: `Heavy Studio Build: v${new Date().getTime()} - Compilação ${config.platform} via CI/CD`,
-      tree: treeData.sha
-    };
-    if (lastCommitSha) {
-      commitBody.parents = [lastCommitSha];
-    } else {
-      commitBody.parents = [];
-    }
-
-    const commitResp = await fetch(`https://api.github.com/repos/${githubUser}/${githubRepo}/git/commits`, {
-      method: 'POST',
-      headers: { Authorization: `token ${githubToken}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify(commitBody)
-    });
-    const commitData = await commitResp.json();
-    if (!commitData.sha) throw new Error("Falha ao criar objeto de commit no GitHub.");
-
-    // 6. Atualizar ou Criar a Referência (Push / Force Push)
-    onLog("🔗 Vinculando branch ao novo commit...");
-    let pushResp: Response;
-    if (lastCommitSha) {
-      pushResp = await fetch(`https://api.github.com/repos/${githubUser}/${githubRepo}/git/refs/heads/${branch}`, {
-        method: 'PATCH',
-        headers: { Authorization: `token ${githubToken}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sha: commitData.sha, force: true })
-      });
-    } else {
-      // Criar nova ref se não existia
-      pushResp = await fetch(`https://api.github.com/repos/${githubUser}/${githubRepo}/git/refs`, {
+      const treeResp = await fetch(`https://api.github.com/repos/${githubUser}/${githubRepo}/git/trees`, {
         method: 'POST',
         headers: { Authorization: `token ${githubToken}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ref: `refs/heads/${branch}`, sha: commitData.sha })
+        body: JSON.stringify(treeBody)
       });
-      if (!pushResp.ok) {
-        // Tentar PATCH se a ref já foi criada simultaneamente
+      const treeData = await treeResp.json();
+      
+      if (!treeResp.ok || !treeData.sha) {
+        onLog("⚠️ PAT simples detectado sem suporte a Git Trees API. Ativando fallback resiliente...");
+        return await this.pushViaContentsApi(config, filesToPush, onLog);
+      }
+
+      // 5. Criar o Commit
+      onLog("💾 Consolidando alterações (Atomic Commit)...");
+      const commitBody: any = {
+        message: `Heavy Studio Build: v${new Date().getTime()} - Compilação ${config.platform} via CI/CD`,
+        tree: treeData.sha
+      };
+      if (lastCommitSha) {
+        commitBody.parents = [lastCommitSha];
+      } else {
+        commitBody.parents = [];
+      }
+
+      const commitResp = await fetch(`https://api.github.com/repos/${githubUser}/${githubRepo}/git/commits`, {
+        method: 'POST',
+        headers: { Authorization: `token ${githubToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(commitBody)
+      });
+      const commitData = await commitResp.json();
+      if (!commitResp.ok || !commitData.sha) {
+        onLog("⚠️ Redirecionando envio para Contents API devido a permissão de Commit...");
+        return await this.pushViaContentsApi(config, filesToPush, onLog);
+      }
+
+      // 6. Atualizar ou Criar a Referência (Push / Force Push)
+      onLog("🔗 Vinculando branch ao novo commit...");
+      let pushResp: Response;
+      if (lastCommitSha) {
         pushResp = await fetch(`https://api.github.com/repos/${githubUser}/${githubRepo}/git/refs/heads/${branch}`, {
           method: 'PATCH',
           headers: { Authorization: `token ${githubToken}`, 'Content-Type': 'application/json' },
           body: JSON.stringify({ sha: commitData.sha, force: true })
         });
+      } else {
+        // Criar nova ref se não existia
+        pushResp = await fetch(`https://api.github.com/repos/${githubUser}/${githubRepo}/git/refs`, {
+          method: 'POST',
+          headers: { Authorization: `token ${githubToken}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ref: `refs/heads/${branch}`, sha: commitData.sha })
+        });
+        if (!pushResp.ok) {
+          // Tentar PATCH se a ref já foi criada simultaneamente
+          pushResp = await fetch(`https://api.github.com/repos/${githubUser}/${githubRepo}/git/refs/heads/${branch}`, {
+            method: 'PATCH',
+            headers: { Authorization: `token ${githubToken}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sha: commitData.sha, force: true })
+          });
+        }
+      }
+
+      if (pushResp.ok) {
+        onLog(`✅ Sincronização concluída! O código e assets foram enviados ao GitHub.`);
+        onLog(`🔗 Acesse a aba "Actions" no GitHub para acompanhar a compilação.`);
+      } else {
+        onLog("⚠️ API de Refs falhou. Ativando fallback via Contents API...");
+        return await this.pushViaContentsApi(config, filesToPush, onLog);
+      }
+    } catch (e: any) {
+      onLog(`⚠️ Erro na sincronização via Tree API (${e.message}). Ativando envio via Contents API...`);
+      return await this.pushViaContentsApi(config, filesToPush, onLog);
+    }
+  },
+
+  /**
+   * Fallback: Envia os arquivos um a um através da API de Conteúdos (PUT /contents/{path})
+   * Funciona com qualquer PAT do GitHub com permissão 'contents:write'
+   */
+  async pushViaContentsApi(
+    config: AppConfig,
+    filesToPush: { path: string; content: string; encoding?: 'utf-8' | 'base64' }[],
+    onLog: (msg: string) => void
+  ): Promise<void> {
+    const { githubUser, githubRepo, githubToken, workflowBranch } = config;
+    const branch = workflowBranch || 'main';
+    onLog("🔄 Sincronizando arquivos diretamente via GitHub Contents API...");
+
+    for (let i = 0; i < filesToPush.length; i++) {
+      const file = filesToPush[i];
+      onLog(`📤 Sincronizando (${i + 1}/${filesToPush.length}): ${file.path}...`);
+
+      try {
+        // Checar SHA existente
+        let existingSha: string | undefined = undefined;
+        const checkResp = await fetch(
+          `https://api.github.com/repos/${githubUser}/${githubRepo}/contents/${file.path}?ref=${branch}`,
+          { headers: { Authorization: `token ${githubToken}` } }
+        );
+        if (checkResp.ok) {
+          const checkData = await checkResp.json();
+          existingSha = checkData.sha;
+        }
+
+        let base64Content = file.content;
+        if (file.encoding !== 'base64') {
+          // Encode UTF-8 seguro para Base64
+          base64Content = btoa(unescape(encodeURIComponent(file.content)));
+        }
+
+        const bodyPayload: any = {
+          message: `Heavy Studio Build: Update ${file.path}`,
+          content: base64Content,
+          branch: branch
+        };
+        if (existingSha) {
+          bodyPayload.sha = existingSha;
+        }
+
+        const putResp = await fetch(
+          `https://api.github.com/repos/${githubUser}/${githubRepo}/contents/${file.path}`,
+          {
+            method: 'PUT',
+            headers: {
+              Authorization: `token ${githubToken}`,
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(bodyPayload)
+          }
+        );
+
+        if (!putResp.ok) {
+          const errData = await putResp.json().catch(() => ({}));
+          onLog(`⚠️ Erro ao enviar ${file.path}: ${errData.message || putResp.statusText}`);
+        }
+      } catch (err: any) {
+        onLog(`⚠️ Falha ao processar ${file.path}: ${err.message}`);
       }
     }
 
-    if (pushResp.ok) {
-      onLog(`✅ Sincronização concluída! O código e assets (inclusive os do ZIP) foram enviados ao GitHub.`);
-      onLog(`🔗 Acesse a aba "Actions" no GitHub para acompanhar a compilação.`);
-    } else {
-      const errJson = await pushResp.json().catch(() => ({}));
-      throw new Error(`Falha ao atualizar referência remota (Push): ${errJson.message || pushResp.statusText}`);
-    }
+    onLog(`✅ Sincronização concluída com sucesso via Contents API (PAT Simples)!`);
+    onLog(`🔗 Acesse a aba "Actions" no GitHub para acompanhar os workflows.`);
   },
 
   /**
@@ -306,6 +387,29 @@ export const GitHubService = {
     });
 
     return resp.ok;
+  },
+
+  /**
+   * Obtém os logs textuais brutos de um job do GitHub Actions
+   */
+  async getJobLogs(config: AppConfig, jobId: number): Promise<string> {
+    const { githubUser, githubRepo, githubToken } = config;
+    if (!githubUser || !githubRepo || !jobId) return '';
+
+    const headers: Record<string, string> = {};
+    if (githubToken) {
+      headers['Authorization'] = `token ${githubToken}`;
+    }
+
+    try {
+      const resp = await fetch(`https://api.github.com/repos/${githubUser}/${githubRepo}/actions/jobs/${jobId}/logs`, { headers });
+      if (resp.ok) {
+        return await resp.text();
+      }
+    } catch (e) {
+      console.error("Erro ao buscar logs brutas do job:", e);
+    }
+    return '';
   }
 };
 
